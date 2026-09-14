@@ -126,6 +126,11 @@ def remove_unregistered(
                     or "torrent does not exist on this tracker" in msg
                     or "torrent has been deleted" in msg
                 ):
+                    log.debug(
+                        "tracker reported unregistered torrent",
+                        tracker_msg=tracker.msg,
+                    )
+
                     # TL reports unregistered sometimes but then it goes away,
                     # so we want to wait a bit before removing
                     currently_unregistered.add(torrent.hash)
