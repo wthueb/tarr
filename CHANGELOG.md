@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.1.0](https://github.com/wthueb/tarr/compare/v5.0.0...v5.1.0) (2026-10-05)
+
+
+### Features
+
+* cleanup empty directories ([8cfd0ca](https://github.com/wthueb/tarr/commit/8cfd0cac1a9a9498da1d187b78f3f591262c50d7))
+
 ## [5.0.0](https://github.com/wthueb/tarr/compare/v4.0.0...v5.0.0) (2026-08-20)
 
 
