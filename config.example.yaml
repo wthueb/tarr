@@ -55,6 +55,21 @@ qbittorrent:
     ignore_categories: []
     free_space_threshold_gibi: 1024
 
+  # prune old empty directories left after deletions performed by qBittorrent or other tools.
+  # requires locally mounted storage and write permissions; paths may differ via mappings.
+  # only immediate children are scanned; symlinks, nonempty directories, and paths referenced
+  # by any current torrent (regardless of category/state) are never removed.
+  cleanup_empty_dirs:
+    enabled: false
+    directories:
+      # one path means identical paths in qBittorrent and tarr
+      - /downloads/cross-seed
+      # for different Docker mounts, replace the entry above with qBittorrent-path:tarr-path:
+      # - "/downloads/cross-seed:/data/torrents/cross-seed"
+    # glob matched against directory names; qui uses name--<8-character hash prefix>
+    name_pattern: "*--????????"
+    min_age_minutes: 60
+
   # reconcile qBittorrent share limits for the categories listed below. configured limits
   # replace different torrent values; null means preserve the current value and -1 means
   # unlimited.

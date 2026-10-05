@@ -5,8 +5,9 @@ category-specific retention rules, removes torrents that are no longer useful,
 and keeps a configurable amount of disk space free. Run it once for a single
 reconciliation pass or leave it running as a daemon.
 
-The service talks to qBittorrent through its WebUI API and does not inspect the
-download directory directly. Configuration is a strictly validated YAML file;
+The service talks to qBittorrent through its WebUI API. The optional
+`cleanup_empty_dirs` job also needs direct access to the download filesystem.
+Configuration is a strictly validated YAML file;
 unknown fields and invalid limits stop startup instead of being silently ignored.
 
 ## What it manages
@@ -19,11 +20,12 @@ Each job is independent and can be enabled or disabled:
 | `remove_stopped` | Removes completed, stopped torrents after a delay, optionally keeping their downloaded content. Actively seeding torrents are untouched. |
 | `set_seed_limits` | Reconciles qBittorrent ratio, seed-time, limit action, and related share-limit settings for explicitly managed categories. |
 | `maintain_free_space` | When disk space is below the target, deletes eligible torrents and their content until the estimated target is reached. |
+| `cleanup_empty_dirs` | Prunes old, empty directories under explicitly configured roots, excluding paths referenced by any current torrent. |
 
 The delayed jobs keep their first-seen timestamps in memory. Restarting `tarr`
 resets those timers, and delays greater than zero are only useful in daemon mode.
 Use `--dry-run` to inspect planned deletions and share-limit changes without
-mutating qBittorrent.
+mutating qBittorrent or the filesystem.
 
 ## Quick start
 
@@ -53,7 +55,7 @@ See [`config.example.yaml`](config.example.yaml) for the complete, documented
 schema. Its three top-level sections are:
 
 - `logging`: log level, output format, and optional rotating file output.
-- `qbittorrent`: WebUI connection, polling interval, and the four job settings.
+- `qbittorrent`: WebUI connection, polling interval, and the five job settings.
 - `trackers`: tracker hostnames and their minimum seed-time and ratio rules.
 
 ### Categories
@@ -100,6 +102,56 @@ The job also sets the inactive-seeding limit to unlimited and uses `MatchAny`
 semantics. qBittorrent versions before 5.3 already use those semantics implicitly.
 No API update is sent when a torrent already matches the resolved state.
 
+### Empty directory cleanup
+
+qBittorrent's `RemoveWithContent` action can leave the parent directories that
+qui creates for cross-seeds. Enable this independent job to clean them up,
+including leftovers from deletions outside `tarr`:
+
+```yaml
+qbittorrent:
+  # alongside the connection and other job settings
+  cleanup_empty_dirs:
+    enabled: true
+    directories:
+      - /downloads/cross-seed
+    name_pattern: "*--????????"
+    min_age_minutes: 60
+```
+
+The job runs each polling pass, after the other jobs. It only considers immediate
+children of the configured roots; it never recursively deletes content or removes
+the roots themselves. The default glob matches qui's `name--<8-character hash
+prefix>` layout. Customize `name_pattern` for other naming schemes, or use `"*"`
+to consider every immediate child.
+
+A candidate must be empty and its modification time must be at least
+`min_age_minutes` old. Symlink roots and children are skipped. Every current
+torrent's save and content paths are protected, including stopped or downloading
+torrents and torrents excluded from other jobs. If the torrent listing fails or
+contains missing/relative save paths, no cleanup is performed. Removal uses only
+`rmdir`, so newly added content prevents deletion. `--dry-run` logs candidates
+without removing them; missing mounts and permission failures are logged.
+
+Each entry in `directories` supports either:
+
+- `/downloads/cross-seed`: the same path in qBittorrent and `tarr`.
+- `/downloads/cross-seed:/data/torrents/cross-seed`: **qBittorrent path first,
+  tarr-local path second**. Only the local side is scanned and modified.
+
+Mappings translate torrent save and content paths before checking protection.
+Matches use complete path components (not similar string prefixes), and the most
+specific source prefix wins when mappings overlap. A torrent saved above a mapped
+root conservatively protects that entire local root. Plain and mapped entries
+can be mixed. Both sides must be absolute, non-root paths without `..`; malformed
+mappings and conflicting destinations for the same source are rejected.
+
+`tarr` must have the storage mounted locally and permission to remove directories,
+but the mount paths may differ from qBittorrent's when a mapping is provided.
+This job is disabled by default and requires at least one directory when enabled.
+It is not suitable for a remote qBittorrent instance whose storage is not mounted
+locally.
+
 ## Docker
 
 The included [`compose.yaml`](compose.yaml) runs both qBittorrent and `tarr`.
@@ -113,6 +165,35 @@ docker compose up -d
 The `tarr` image runs as UID/GID 999 and reads the mounted configuration from
 `/config/config.yaml`. The compose file builds the local source by default;
 remove `build` if you only want to use `ghcr.io/wthueb/tarr:latest`.
+
+For directory cleanup, mount the same storage in **both** containers, and run
+`tarr` with a UID/GID that can remove the folders. Different container paths are
+supported. For example, add these settings to the respective services (retaining
+their existing mounts):
+
+```yaml
+services:
+  qbittorrent:
+    volumes:
+      - /path/to/downloads:/downloads
+  tarr:
+    user: "1000:1000" # match the download directory's ownership/permissions
+    volumes:
+      - /path/to/downloads:/data/torrents
+```
+
+For these mounts, configure `tarr` with:
+
+```yaml
+qbittorrent:
+  cleanup_empty_dirs:
+    enabled: true
+    directories:
+      - "/downloads/cross-seed:/data/torrents/cross-seed"
+```
+
+The included compose file does not mount downloads by default; enabling cleanup
+without adding this shared mount will only log a missing-directory warning.
 
 ## Logging
 
@@ -135,7 +216,8 @@ uv run ty check
 ```
 
 Source lives in [`tarr/`](tarr/), with configuration models in `config.py`, job
-orchestration in `main.py`, and structured logging in `logging.py`. Tests live in
+orchestration in `main.py`, filesystem cleanup in `cleanup.py`, and structured
+logging in `logging.py`. Tests live in
 [`tests/`](tests/). Releases are packaged from `pyproject.toml` and the container
 build is defined in [`Dockerfile`](Dockerfile).
 

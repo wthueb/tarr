@@ -32,6 +32,10 @@ def test_example_config_uses_supported_structure():
     assert config.qbittorrent.remove_stopped.enabled is False
     assert config.qbittorrent.maintain_free_space.enabled is True
     assert config.qbittorrent.set_seed_limits.enabled is True
+    assert config.qbittorrent.cleanup_empty_dirs.enabled is False
+    assert config.qbittorrent.cleanup_empty_dirs.directories == ["/downloads/cross-seed"]
+    mapping = config.qbittorrent.cleanup_empty_dirs.directory_mappings[0]
+    assert mapping.qbittorrent_path == mapping.local_path == pathlib.Path("/downloads/cross-seed")
 
 
 @pytest.mark.parametrize(
@@ -42,6 +46,7 @@ def test_example_config_uses_supported_structure():
         "remove_stopped",
         "maintain_free_space",
         "set_seed_limits",
+        "cleanup_empty_dirs",
     ],
 )
 def test_qbittorrent_fields_are_rejected_at_config_root(field):

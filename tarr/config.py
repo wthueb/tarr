@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Iterable
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NamedTuple
 from urllib.parse import urlparse
 
 import yaml
@@ -212,6 +212,74 @@ class SetSeedLimitsConfig(BaseModel):
         return next((item for item in self.categories if item.name == category), None)
 
 
+class CleanupDirectoryMapping(NamedTuple):
+    qbittorrent_path: pathlib.Path
+    local_path: pathlib.Path
+
+    @classmethod
+    def parse(cls, value: str) -> CleanupDirectoryMapping:
+        parts = value.split(":")
+        if len(parts) not in {1, 2}:
+            raise ValueError(
+                "cleanup directories must use 'qBittorrent-path:tarr-path' or one path"
+            )
+        paths = [pathlib.Path(part) for part in parts]
+        for path in paths:
+            if not path.is_absolute() or path == pathlib.Path(path.anchor) or ".." in path.parts:
+                raise ValueError(
+                    "cleanup directories must be absolute, non-root paths without '..'"
+                )
+        return cls(paths[0], paths[-1])
+
+
+class CleanupEmptyDirsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    directories: list[str] = Field(default_factory=list)
+    name_pattern: str = "*--????????"
+    min_age_minutes: int = Field(default=60, ge=0)
+
+    @field_validator("directories", mode="before")
+    @classmethod
+    def _stringify_paths(cls, value: object) -> object:
+        if isinstance(value, (list, tuple)):
+            return [str(item) if isinstance(item, pathlib.Path) else item for item in value]
+        return value
+
+    @field_validator("directories")
+    @classmethod
+    def _validate_mappings(cls, value: list[str]) -> list[str]:
+        for directory in value:
+            CleanupDirectoryMapping.parse(directory)
+        return value
+
+    @property
+    def directory_mappings(self) -> list[CleanupDirectoryMapping]:
+        return [CleanupDirectoryMapping.parse(directory) for directory in self.directories]
+
+    @field_validator("name_pattern")
+    @classmethod
+    def _require_basename_pattern(cls, value: str) -> str:
+        if not value or "/" in value or "\\" in value or value in {".", ".."}:
+            raise ValueError("name_pattern must match directory names, not paths")
+        return value
+
+    @model_validator(mode="after")
+    def _require_directories(self) -> CleanupEmptyDirsConfig:
+        if self.enabled and not self.directories:
+            raise ValueError("directories are required when cleanup_empty_dirs is enabled")
+        destinations: dict[pathlib.Path, pathlib.Path] = {}
+        for mapping in self.directory_mappings:
+            previous = destinations.get(mapping.qbittorrent_path)
+            if previous is not None and previous != mapping.local_path:
+                raise ValueError(
+                    "a qBittorrent cleanup directory cannot map to multiple tarr paths"
+                )
+            destinations[mapping.qbittorrent_path] = mapping.local_path
+        return self
+
+
 class QBittorrentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -223,6 +291,7 @@ class QBittorrentConfig(BaseModel):
     remove_stopped: RemoveStoppedConfig = Field(default_factory=RemoveStoppedConfig)
     maintain_free_space: MaintainFreeSpaceConfig = Field(default_factory=MaintainFreeSpaceConfig)
     set_seed_limits: SetSeedLimitsConfig = Field(default_factory=SetSeedLimitsConfig)
+    cleanup_empty_dirs: CleanupEmptyDirsConfig = Field(default_factory=CleanupEmptyDirsConfig)
 
 
 class Config(BaseModel):

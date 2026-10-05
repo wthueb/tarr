@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from qbittorrentapi.torrents import TorrentStatusesT
 from structlog.contextvars import bound_contextvars
 
+from tarr.cleanup import cleanup_empty_dirs
 from tarr.config import (
     UNLIMITED,
     Config,
@@ -435,6 +436,10 @@ def run(
         with bound_contextvars(job="maintain_free_space"):
             maintain_free_space(client, config, dry_run)
 
+    if qbittorrent.cleanup_empty_dirs.enabled:
+        with bound_contextvars(job="cleanup_empty_dirs"):
+            cleanup_empty_dirs(client, qbittorrent.cleanup_empty_dirs, dry_run)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -450,7 +455,7 @@ def main():
         "-n",
         "--dry-run",
         action="store_true",
-        help="log what would be removed without deleting anything",
+        help="log planned changes without modifying torrents or directories",
     )
 
     args = parser.parse_args()
@@ -468,7 +473,7 @@ def main():
     client = build_client(config.qbittorrent)
 
     if args.dry_run:
-        log.info("dry-run mode: no torrents will be deleted")
+        log.info("dry-run mode: no torrents or directories will be modified")
 
     unregistered_first_seen: dict[str, datetime.datetime] = {}
     stopped_first_seen: dict[str, datetime.datetime] = {}
