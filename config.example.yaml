@@ -31,7 +31,10 @@ qbittorrent:
 
   # remove torrents after they have continuously appeared as completed and stopped for
   # `delay_minutes`. actively seeding torrents are left alone; tracking starts when
-  # tarr first observes a completed torrent in a stopped state.
+  # tarr first observes a completed torrent in a stopped state. removal also requires
+  # reaching the torrent's active qBittorrent seed-time OR ratio limit; -1 is unlimited.
+  # inherited defaults, manually defined limits, and limits applied by set_seed_limits
+  # are respected. set_seed_limits runs first; no matching tracker is required.
   remove_stopped:
     enabled: false
     delay_minutes: 15

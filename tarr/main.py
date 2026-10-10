@@ -212,6 +212,22 @@ def remove_stopped(
                     log.debug("stopped torrent removal delayed")
                 continue
 
+            seed_time_met = torrent.max_seeding_time >= 0 and (
+                torrent.seeding_time >= torrent.max_seeding_time * 60
+            )
+            ratio_met = torrent.max_ratio >= 0 and (
+                torrent.ratio == -1 or torrent.ratio >= torrent.max_ratio
+            )
+            with bound_contextvars(
+                seeding_time_seconds=torrent.seeding_time,
+                torrent_ratio=torrent.ratio,
+                minimum_seed_time_minutes=torrent.max_seeding_time,
+                minimum_ratio=torrent.max_ratio,
+            ):
+                if not (seed_time_met or ratio_met):
+                    log.debug("torrent does not meet removal criteria")
+                    continue
+
             delete_files = cfg.on_delete == "RemoveWithContent"
             with bound_contextvars(
                 dry_run=dry_run,
@@ -424,13 +440,13 @@ def run(
                 dry_run,
             )
 
-    if qbittorrent.remove_stopped.enabled:
-        with bound_contextvars(job="remove_stopped"):
-            remove_stopped(client, qbittorrent.remove_stopped, stopped_first_seen, dry_run)
-
     if qbittorrent.set_seed_limits.enabled:
         with bound_contextvars(job="set_seed_limits"):
             set_seed_limits(client, config, dry_run)
+
+    if qbittorrent.remove_stopped.enabled:
+        with bound_contextvars(job="remove_stopped"):
+            remove_stopped(client, qbittorrent.remove_stopped, stopped_first_seen, dry_run)
 
     if qbittorrent.maintain_free_space.enabled:
         with bound_contextvars(job="maintain_free_space"):

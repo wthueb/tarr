@@ -17,10 +17,13 @@ Each job is independent and can be enabled or disabled:
 | Job | Behavior |
 | --- | --- |
 | `remove_unregistered` | Deletes a torrent and its content after a tracker continuously reports it as unregistered for a configured delay. |
-| `remove_stopped` | Removes completed, stopped torrents after a delay, optionally keeping their downloaded content. Actively seeding torrents are untouched. |
 | `set_seed_limits` | Reconciles qBittorrent ratio, seed-time, limit action, and related share-limit settings for explicitly managed categories. |
+| `remove_stopped` | Removes completed, stopped torrents after a delay only when an active torrent seed-time or ratio limit is met, optionally keeping their downloaded content. Actively seeding torrents are untouched. |
 | `maintain_free_space` | When disk space is below the target, deletes eligible torrents and their content until the estimated target is reached. |
 | `cleanup_empty_dirs` | Prunes old, empty directories under explicitly configured roots, excluding paths referenced by any current torrent. |
+
+Jobs run in the order listed above. `set_seed_limits` runs before `remove_stopped`,
+which fetches the updated active limits even on the first pass.
 
 The delayed jobs keep their first-seen timestamps in memory. Restarting `tarr`
 resets those timers, and delays greater than zero are only useful in daemon mode.
@@ -77,7 +80,17 @@ matches an announce hostname or its subdomain. Tracker policies provide a
 eligible after satisfying either value; `-1` makes that dimension unlimited, so
 it can never make the torrent eligible.
 
-When cleanup is needed, unmanaged trackers and excluded categories are skipped.
+`remove_stopped` requires a completed download in `pausedUP` or `stoppedUP`,
+including manually stopped torrents, and at least one satisfied active torrent
+seed-time or ratio limit. It uses qBittorrent's resolved `max_seeding_time` and
+`max_ratio`, including inherited defaults, rather than looking up tracker policies.
+This respects limits applied by `set_seed_limits` as well as manually defined
+limits; no matching configured tracker is required. Unlimited limits cannot make
+a torrent eligible, and torrents with both limits unlimited are kept.
+Its delay starts when the completed torrent is first observed stopped and resets
+if it resumes or is no longer completed. A passed delay never bypasses the limits.
+
+When free-space cleanup is needed, unmanaged trackers and excluded categories are skipped.
 Eligible torrents are ordered by average ratio gained per second of seeding,
 lowest first, and deleted with their content until enough space is estimated to
 have been reclaimed.
