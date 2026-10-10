@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.1.1](https://github.com/wthueb/tarr/compare/v5.1.0...v5.1.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* respect seed limits in remove_stopped ([e6397e1](https://github.com/wthueb/tarr/commit/e6397e1d800c03ec7586a8a2c658e4548a5d9c2d))
+
 ## [5.1.0](https://github.com/wthueb/tarr/compare/v5.0.0...v5.1.0) (2026-10-05)
 
 
