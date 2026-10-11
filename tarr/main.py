@@ -409,7 +409,10 @@ def maintain_free_space(
                 if not dry_run:
                     torrent.delete(delete_files=True)
 
-            free_space += torrent.size
+            if dry_run:
+                free_space += torrent.size
+            else:
+                free_space = client.sync_maindata().server_state.free_space_on_disk
 
 
 def run(

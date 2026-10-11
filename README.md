@@ -19,7 +19,7 @@ Each job is independent and can be enabled or disabled:
 | `remove_unregistered` | Deletes a torrent and its content after a tracker continuously reports it as unregistered for a configured delay. |
 | `set_seed_limits` | Reconciles qBittorrent ratio, seed-time, limit action, and related share-limit settings for explicitly managed categories. |
 | `remove_stopped` | Removes completed, stopped torrents after a delay only when an active torrent seed-time or ratio limit is met, optionally keeping their downloaded content. Actively seeding torrents are untouched. |
-| `maintain_free_space` | When disk space is below the target, deletes eligible torrents and their content until the estimated target is reached. |
+| `maintain_free_space` | When disk space is below the target, deletes eligible torrents and their content, rechecking qBittorrent's reported free space after each deletion. |
 | `cleanup_empty_dirs` | Prunes old, empty directories under explicitly configured roots, excluding paths referenced by any current torrent. |
 
 Jobs run in the order listed above. `set_seed_limits` runs before `remove_stopped`,
@@ -92,7 +92,10 @@ if it resumes or is no longer completed. A passed delay never bypasses the limit
 
 When free-space cleanup is needed, unmanaged trackers and excluded categories are skipped.
 Eligible torrents are ordered by total swarm seeder count, highest first, and
-deleted with their content until enough space is estimated to have been reclaimed.
+deleted with their content until qBittorrent reports enough free space or no eligible
+torrents remain. Free space is re-read after each deletion, so removing a hard link
+is not assumed to reclaim the torrent's size while other links remain. Dry runs
+still estimate reclaimed space from torrent sizes because nothing is deleted.
 
 ### Share limits
 

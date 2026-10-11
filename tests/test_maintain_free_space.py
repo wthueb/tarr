@@ -16,11 +16,13 @@ class FakeClient:
     def __init__(self, torrents, free_space=0):
         self.torrents = torrents
         self.free_space = free_space
+        self.space_reads = 0
 
     def torrents_info(self):
         return self.torrents
 
     def sync_maindata(self):
+        self.space_reads += 1
         return SimpleNamespace(server_state=SimpleNamespace(free_space_on_disk=self.free_space))
 
 
@@ -83,17 +85,41 @@ def test_removes_most_seeded_first_regardless_of_upload_rate_or_connected_seeder
         torrent.delete.assert_called_once_with(delete_files=True)
 
 
-def test_stops_deleting_when_estimated_free_space_reaches_threshold():
+def test_stops_deleting_when_reported_free_space_reaches_threshold():
     low = make_torrent("low", 1)
     high = make_torrent("high", 100)
     middle = make_torrent("middle", 10)
     client = FakeClient([low, high, middle], free_space=GIB)
+    high.delete.side_effect = lambda **_kwargs: setattr(client, "free_space", 3 * GIB)
 
-    maintain_free_space(cast(qbittorrentapi.Client, client), make_config(threshold=2))
+    maintain_free_space(cast(qbittorrentapi.Client, client), make_config(threshold=3))
 
     high.delete.assert_called_once_with(delete_files=True)
     middle.delete.assert_not_called()
     low.delete.assert_not_called()
+    assert client.space_reads == 2
+
+
+@pytest.mark.parametrize("space_after_last_link", [0, GIB])
+def test_continues_deleting_when_hard_link_removal_reclaims_no_space(space_after_last_link):
+    first_link = make_torrent("first_link", 100)
+    last_link = make_torrent("last_link", 10)
+    other = make_torrent("other", 1)
+    client = FakeClient([other, last_link, first_link])
+    last_link.delete.side_effect = lambda **_kwargs: setattr(
+        client, "free_space", space_after_last_link
+    )
+
+    maintain_free_space(cast(qbittorrentapi.Client, client), make_config(threshold=1))
+
+    first_link.delete.assert_called_once_with(delete_files=True)
+    last_link.delete.assert_called_once_with(delete_files=True)
+    if space_after_last_link == 0:
+        other.delete.assert_called_once_with(delete_files=True)
+        assert client.space_reads == 4
+    else:
+        other.delete.assert_not_called()
+        assert client.space_reads == 3
 
 
 @pytest.mark.parametrize("free_space", [GIB, 2 * GIB])
@@ -133,9 +159,10 @@ def test_dry_run_selects_most_seeded_without_deleting(monkeypatch):
             selected.append(get_contextvars())
 
     monkeypatch.setattr(log, "info", record_selection)
+    client = FakeClient([low, high])
 
     maintain_free_space(
-        cast(qbittorrentapi.Client, FakeClient([low, high])),
+        cast(qbittorrentapi.Client, client),
         make_config(threshold=1),
         dry_run=True,
     )
@@ -144,5 +171,6 @@ def test_dry_run_selects_most_seeded_without_deleting(monkeypatch):
     assert selected[0]["torrent_seeders"] == 100
     assert selected[0]["dry_run"] is True
     assert get_contextvars() == {}
+    assert client.space_reads == 1
     low.delete.assert_not_called()
     high.delete.assert_not_called()
