@@ -59,7 +59,7 @@ schema. Its three top-level sections are:
 
 - `logging`: log level, output format, and optional rotating file output.
 - `qbittorrent`: WebUI connection, polling interval, and the five job settings.
-- `trackers`: tracker hostnames and their minimum seed-time and ratio rules.
+- `trackers`: tracker hostnames, minimum seed-time and ratio rules, and deletion priorities.
 
 ### Categories
 
@@ -91,9 +91,12 @@ Its delay starts when the completed torrent is first observed stopped and resets
 if it resumes or is no longer completed. A passed delay never bypasses the limits.
 
 When free-space cleanup is needed, unmanaged trackers and excluded categories are skipped.
-Eligible torrents are ordered by total swarm seeder count, highest first, and
-deleted with their content until qBittorrent reports enough free space or no eligible
-torrents remain. Free space is re-read after each deletion, so removing a hard link
+Eligible torrents are ordered by their tracker's `delete_priority`, highest first,
+then by total swarm seeder count, highest first. Each tracker defaults to
+`delete_priority: 0`; positive and negative integers are supported. Priority only
+controls deletion order, never eligibility. With equal priorities, the existing
+most-seeded-first behavior is preserved. Torrents are deleted with their content
+until qBittorrent reports enough free space or no eligible torrents remain. Free space is re-read after each deletion, so removing a hard link
 is not assumed to reclaim the torrent's size while other links remain. Dry runs
 still estimate reclaimed space from torrent sizes because nothing is deleted.
 

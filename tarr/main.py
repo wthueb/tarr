@@ -19,6 +19,7 @@ from tarr.config import (
     QBittorrentConfig,
     RemoveStoppedConfig,
     RemoveUnregisteredConfig,
+    TrackerConfig,
     category_is_included,
     load_config,
 )
@@ -351,7 +352,7 @@ def maintain_free_space(
             log.info("free space above threshold; nothing to do")
         return
 
-    possible_to_remove: list[qbittorrentapi.TorrentDictionary] = []
+    possible_to_remove: list[tuple[qbittorrentapi.TorrentDictionary, TrackerConfig]] = []
 
     for torrent in torrents:
         with bound_contextvars(**_torrent_context(torrent)):
@@ -365,6 +366,7 @@ def maintain_free_space(
 
             with bound_contextvars(
                 tracker=tracker.name,
+                delete_priority=tracker.delete_priority,
                 torrent_ratio=torrent.ratio,
                 uploaded_bytes=torrent.uploaded,
                 seeding_time_seconds=torrent.seeding_time,
@@ -385,20 +387,24 @@ def maintain_free_space(
                     log.debug("torrent does not meet removal criteria")
                     continue
 
-            possible_to_remove.append(torrent)
+            possible_to_remove.append((torrent, tracker))
 
-    possible_to_remove.sort(key=lambda t: t.num_complete, reverse=True)
+    possible_to_remove.sort(
+        key=lambda item: (item[1].delete_priority, item[0].num_complete), reverse=True
+    )
 
     with bound_contextvars(eligible_torrent_count=len(possible_to_remove)):
         log.debug("identified torrents meeting removal criteria")
 
     while possible_to_remove and free_space < threshold:
-        torrent = possible_to_remove.pop(0)
+        torrent, tracker = possible_to_remove.pop(0)
 
         with bound_contextvars(**_torrent_context(torrent)):
             with bound_contextvars(
                 dry_run=dry_run,
                 delete_files=True,
+                tracker=tracker.name,
+                delete_priority=tracker.delete_priority,
                 torrent_ratio=torrent.ratio,
                 uploaded_bytes=torrent.uploaded,
                 seeding_time_seconds=torrent.seeding_time,

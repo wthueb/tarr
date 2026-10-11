@@ -47,8 +47,9 @@ qbittorrent:
     on_delete: Remove
 
   # once free space drops below `free_space_threshold_gibi`, remove eligible torrents
-  # (most seeders first) until the threshold is met. a torrent is eligible once it
-  # has seeded longer than its tracker's `seed_time_minutes` OR reached its `ratio`.
+  # (highest tracker delete_priority first, then most swarm seeders) until the threshold
+  # is met. a torrent is eligible once it has seeded longer than its tracker's
+  # `seed_time_minutes` OR reached its `ratio`.
   maintain_free_space:
     enabled: true
     # only torrents in one of these categories are considered (set to null for all)
@@ -108,3 +109,6 @@ trackers:
       - tracker.example.org
     seed_time_minutes: 20160 # 14 days
     ratio: 2.0
+    # higher values are deleted first by maintain_free_space; defaults to 0.
+    # negative values are allowed. priority never bypasses seed-time or ratio eligibility.
+    delete_priority: 0

@@ -51,6 +51,7 @@ class TrackerConfig(BaseModel):
     hosts: list[str] = Field(min_length=1)
     seed_time_minutes: SeedTimeMinutes
     ratio: Ratio
+    delete_priority: int = 0
 
     def matches(self, hostname: str) -> bool:
         hostname = hostname.lower()

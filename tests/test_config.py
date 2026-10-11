@@ -38,6 +38,31 @@ def test_example_config_uses_supported_structure():
     assert mapping.qbittorrent_path == mapping.local_path == pathlib.Path("/downloads/cross-seed")
 
 
+def test_tracker_delete_priority_defaults_to_zero():
+    config = Config.model_validate(minimal_config())
+
+    assert config.trackers[0].delete_priority == 0
+
+
+@pytest.mark.parametrize("priority", [-10, 0, 10])
+def test_tracker_delete_priority_accepts_integers(priority):
+    raw = minimal_config()
+    raw["trackers"][0]["delete_priority"] = priority
+
+    config = Config.model_validate(raw)
+
+    assert config.trackers[0].delete_priority == priority
+
+
+@pytest.mark.parametrize("priority", [1.5, "high", None])
+def test_tracker_delete_priority_rejects_invalid_values(priority):
+    raw = minimal_config()
+    raw["trackers"][0]["delete_priority"] = priority
+
+    with pytest.raises(ValidationError):
+        Config.model_validate(raw)
+
+
 @pytest.mark.parametrize(
     "field",
     [
