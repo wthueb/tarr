@@ -1,5 +1,18 @@
 # Changelog
 
+## [5.2.0](https://github.com/wthueb/tarr/compare/v5.1.1...v5.2.0) (2026-10-11)
+
+
+### Features
+
+* maintain_free_space tracker delete priority ([0507367](https://github.com/wthueb/tarr/commit/05073674b6976bf65068e1673f13b84a4354eddd))
+
+
+### Bug Fixes
+
+* maintain_free_space accounts for hard links ([4e1c0e2](https://github.com/wthueb/tarr/commit/4e1c0e21f5d6f18fa8a0fdfc177d0aafd1be50fe))
+* maintain_free_space remove in reverse seeder count order ([750df77](https://github.com/wthueb/tarr/commit/750df77c2654abacf4318403f036e155342cc67c))
+
 ## [5.1.1](https://github.com/wthueb/tarr/compare/v5.1.0...v5.1.1) (2026-10-10)
 
 
