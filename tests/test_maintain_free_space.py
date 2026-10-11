@@ -1,0 +1,148 @@
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import Mock
+
+import pytest
+import qbittorrentapi
+from structlog.contextvars import get_contextvars
+
+from tarr.config import Config
+from tarr.main import log, maintain_free_space
+
+GIB = 1024**3
+
+
+class FakeClient:
+    def __init__(self, torrents, free_space=0):
+        self.torrents = torrents
+        self.free_space = free_space
+
+    def torrents_info(self):
+        return self.torrents
+
+    def sync_maindata(self):
+        return SimpleNamespace(server_state=SimpleNamespace(free_space_on_disk=self.free_space))
+
+
+def make_config(threshold=3, **filters):
+    return Config.model_validate(
+        {
+            "qbittorrent": {
+                "host": "localhost",
+                "username": "user",
+                "password": "pass",
+                "maintain_free_space": {
+                    "enabled": True,
+                    "free_space_threshold_gibi": threshold,
+                    **filters,
+                },
+            },
+            "trackers": [
+                {
+                    "name": "example",
+                    "hosts": ["tracker.example.com"],
+                    "seed_time_minutes": 1,
+                    "ratio": 1,
+                }
+            ],
+        }
+    )
+
+
+def make_torrent(name, seeders, *, seeding_time=120, ratio=1, category="movies"):
+    return SimpleNamespace(
+        hash=name,
+        name=name,
+        state="uploading",
+        size=GIB,
+        category=category,
+        seeding_time=seeding_time,
+        ratio=ratio,
+        uploaded=ratio * GIB,
+        num_complete=seeders,
+        num_seeds=0,
+        trackers=[SimpleNamespace(url="https://tracker.example.com/announce")],
+        delete=Mock(),
+    )
+
+
+def test_removes_most_seeded_first_regardless_of_upload_rate_or_connected_seeders():
+    low = make_torrent("low", 1, seeding_time=1200)
+    high = make_torrent("high", 100, seeding_time=0, ratio=10)
+    middle = make_torrent("middle", 10)
+    low.num_seeds = 50
+    torrents = [low, high, middle]
+    deleted = []
+    for torrent in torrents:
+        torrent.delete.side_effect = lambda *, t=torrent, **_kwargs: deleted.append(t.name)
+
+    maintain_free_space(cast(qbittorrentapi.Client, FakeClient(torrents)), make_config())
+
+    assert deleted == ["high", "middle", "low"]
+    for torrent in torrents:
+        torrent.delete.assert_called_once_with(delete_files=True)
+
+
+def test_stops_deleting_when_estimated_free_space_reaches_threshold():
+    low = make_torrent("low", 1)
+    high = make_torrent("high", 100)
+    middle = make_torrent("middle", 10)
+    client = FakeClient([low, high, middle], free_space=GIB)
+
+    maintain_free_space(cast(qbittorrentapi.Client, client), make_config(threshold=2))
+
+    high.delete.assert_called_once_with(delete_files=True)
+    middle.delete.assert_not_called()
+    low.delete.assert_not_called()
+
+
+@pytest.mark.parametrize("free_space", [GIB, 2 * GIB])
+def test_does_not_delete_when_free_space_meets_or_exceeds_threshold(free_space):
+    torrent = make_torrent("high", 100)
+    client = FakeClient([torrent], free_space=free_space)
+
+    maintain_free_space(cast(qbittorrentapi.Client, client), make_config(threshold=1))
+
+    torrent.delete.assert_not_called()
+
+
+def test_preserves_eligibility_and_category_filters():
+    eligible = make_torrent("eligible", 1)
+    below_limits = make_torrent("below_limits", 100, seeding_time=0, ratio=0)
+    unmanaged = make_torrent("unmanaged", 100)
+    unmanaged.trackers = [SimpleNamespace(url="https://unknown.example/announce")]
+    excluded = make_torrent("excluded", 100, category="upload")
+    not_included = make_torrent("not_included", 100, category="tv")
+    torrents = [below_limits, unmanaged, excluded, not_included, eligible]
+    config = make_config(categories=["movies", "upload"], ignore_categories=["upload"])
+
+    maintain_free_space(cast(qbittorrentapi.Client, FakeClient(torrents)), config)
+
+    eligible.delete.assert_called_once_with(delete_files=True)
+    for torrent in torrents[:-1]:
+        torrent.delete.assert_not_called()
+
+
+def test_dry_run_selects_most_seeded_without_deleting(monkeypatch):
+    low = make_torrent("low", 0)
+    high = make_torrent("high", 100)
+    selected = []
+
+    def record_selection(event, **_kwargs):
+        if event == "torrent selected to reclaim free space":
+            selected.append(get_contextvars())
+
+    monkeypatch.setattr(log, "info", record_selection)
+
+    maintain_free_space(
+        cast(qbittorrentapi.Client, FakeClient([low, high])),
+        make_config(threshold=1),
+        dry_run=True,
+    )
+
+    assert [context["torrent"] for context in selected] == ["high"]
+    assert selected[0]["torrent_seeders"] == 100
+    assert selected[0]["dry_run"] is True
+    assert get_contextvars() == {}
+    low.delete.assert_not_called()
+    high.delete.assert_not_called()

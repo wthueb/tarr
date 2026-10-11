@@ -91,9 +91,8 @@ Its delay starts when the completed torrent is first observed stopped and resets
 if it resumes or is no longer completed. A passed delay never bypasses the limits.
 
 When free-space cleanup is needed, unmanaged trackers and excluded categories are skipped.
-Eligible torrents are ordered by average ratio gained per second of seeding,
-lowest first, and deleted with their content until enough space is estimated to
-have been reclaimed.
+Eligible torrents are ordered by total swarm seeder count, highest first, and
+deleted with their content until enough space is estimated to have been reclaimed.
 
 ### Share limits
 

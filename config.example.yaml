@@ -47,7 +47,7 @@ qbittorrent:
     on_delete: Remove
 
   # once free space drops below `free_space_threshold_gibi`, remove eligible torrents
-  # (lowest upload rate first) until the threshold is met. a torrent is eligible once it
+  # (most seeders first) until the threshold is met. a torrent is eligible once it
   # has seeded longer than its tracker's `seed_time_minutes` OR reached its `ratio`.
   maintain_free_space:
     enabled: true

@@ -358,18 +358,17 @@ def maintain_free_space(
             tracker = config.match_tracker(t.url for t in torrent.trackers)
 
             if tracker is None:
-                log.debug("torrent is not managed by a configured tracker; skipping")
+                log.warn("torrent is not managed by a configured tracker; skipping")
                 continue
 
             seeding_time = datetime.timedelta(seconds=torrent.seeding_time)
-            upload_rate = torrent.uploaded / torrent.seeding_time if torrent.seeding_time > 0 else 0
 
             with bound_contextvars(
                 tracker=tracker.name,
                 torrent_ratio=torrent.ratio,
                 uploaded_bytes=torrent.uploaded,
                 seeding_time_seconds=torrent.seeding_time,
-                upload_rate_bytes_per_second=upload_rate,
+                torrent_seeders=torrent.num_complete,
                 minimum_seed_time_minutes=tracker.seed_time_minutes,
                 minimum_ratio=tracker.ratio,
             ):
@@ -388,9 +387,7 @@ def maintain_free_space(
 
             possible_to_remove.append(torrent)
 
-    possible_to_remove.sort(
-        key=lambda t: t.ratio / t.seeding_time if t.seeding_time > 0 else float("inf")
-    )
+    possible_to_remove.sort(key=lambda t: t.num_complete, reverse=True)
 
     with bound_contextvars(eligible_torrent_count=len(possible_to_remove)):
         log.debug("identified torrents meeting removal criteria")
@@ -399,15 +396,13 @@ def maintain_free_space(
         torrent = possible_to_remove.pop(0)
 
         with bound_contextvars(**_torrent_context(torrent)):
-            upload_rate = torrent.uploaded / torrent.seeding_time if torrent.seeding_time > 0 else 0
-
             with bound_contextvars(
                 dry_run=dry_run,
                 delete_files=True,
                 torrent_ratio=torrent.ratio,
                 uploaded_bytes=torrent.uploaded,
                 seeding_time_seconds=torrent.seeding_time,
-                upload_rate_bytes_per_second=upload_rate,
+                torrent_seeders=torrent.num_complete,
             ):
                 log.info("torrent selected to reclaim free space")
 
