@@ -55,18 +55,58 @@ logged before the next one is attempted.
 ## Configuration model
 
 See [`config.example.yaml`](config.example.yaml) for the complete, documented
-schema. Its three top-level sections are:
+schema. Its top-level sections are:
 
 - `logging`: log level, output format, and optional rotating file output.
 - `qbittorrent`: WebUI connection, polling interval, and the five job settings.
 - `trackers`: tracker hostnames, minimum seed-time and ratio rules, and deletion priorities.
+- `arrs`: optional named Radarr/Sonarr connections for removal verification.
 
 ### Categories
 
 The three removal jobs share include/exclude filters. `categories: null` includes
 all categories; otherwise only exact names in the list are included.
 `ignore_categories` always wins over `categories`. Use YAML `null` in either list
-for torrents that have no category.
+for torrents that have no category. Category entries can also be objects with
+`name` and `arr_verify_removal`:
+
+```yaml
+qbittorrent:
+  remove_stopped:
+    enabled: true
+    categories:
+      - name: radarr
+        arr_verify_removal: [radarr, radarr4k]
+      - name: sonarr
+        arr_verify_removal: [sonarr]
+    on_delete: RemoveWithContent
+arrs:
+  radarr:
+    host: http://radarr:7878
+    api_key: replace-me
+  radarr4k:
+    host: http://radarr4k:7878
+    api_key: replace-me
+  sonarr:
+    host: http://sonarr:8989
+    api_key: replace-me
+```
+
+This example is a fragment to merge into the full configuration. All three removal
+jobs accept this shape. Verification is scoped to the job/category where it is
+configured, not inherited by other jobs. Immediately before removal, each named
+instance's `/api/v3/queue` is checked, including every page and unknown items.
+Torrent hashes are matched case-insensitively against `downloadId`; any matching
+queue entry blocks removal regardless of its status. An unreachable instance,
+failed authentication, or invalid response also blocks removal. Unknown instance
+names are rejected at startup. Dry runs perform the same checks without deleting.
+Skipped torrents retain their delay tracking and can be reconsidered on later runs;
+free-space cleanup continues to other candidates without counting skipped space.
+
+Use `action: Stop` for these categories in `set_seed_limits` so qBittorrent cannot
+automatically delete them before verification; enable `remove_stopped` to handle
+subsequent removal. Checks only guard deletions performed by `tarr`, not other tools
+or qBittorrent's own automatic removal actions.
 
 `set_seed_limits` is intentionally opt-in: only exact category names listed under
 that job are changed. A category named `null` manages uncategorized torrents.

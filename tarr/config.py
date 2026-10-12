@@ -79,19 +79,78 @@ class LoggingConfig(BaseModel):
         return value
 
 
+class RemovalCategoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None
+    arr_verify_removal: list[str] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def _normalize_uncategorized_name(cls, value: str | None) -> str | None:
+        return None if value == "" else value
+
+
+RemovalCategory = RemovalCategoryConfig | str | None
+
+
+def removal_category_name(category: RemovalCategory) -> str | None:
+    return category.name if isinstance(category, RemovalCategoryConfig) else category or None
+
+
+class ArrConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    host: str
+    api_key: str = Field(min_length=1, repr=False)
+
+    @field_validator("host")
+    @classmethod
+    def _validate_host(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "Arr host must be an HTTP(S) URL without credentials, query or fragment"
+            )
+        return value.rstrip("/")
+
+
 class CategoryFilterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     # if set, only torrents in these categories are considered; a null entry
     # represents torrents without a category
-    categories: list[str | None] | None = None
+    categories: list[RemovalCategory] | None = None
     # torrents in these categories are never considered; a null entry represents
     # torrents without a category
     ignore_categories: list[str | None] = Field(default_factory=list)
 
     def includes_category(self, category: str | None) -> bool:
-        return category_is_included(category, self.categories, self.ignore_categories)
+        names = (
+            [removal_category_name(item) for item in self.categories]
+            if self.categories is not None
+            else None
+        )
+        return category_is_included(category, names, self.ignore_categories)
+
+    def arr_instances(self, category: str | None) -> list[str]:
+        category = category or None
+        return list(
+            dict.fromkeys(
+                instance
+                for item in self.categories or []
+                if isinstance(item, RemovalCategoryConfig) and item.name == category
+                for instance in item.arr_verify_removal
+            )
+        )
 
     @property
     def overlapping_categories(self) -> list[str | None]:
@@ -99,7 +158,13 @@ class CategoryFilterConfig(BaseModel):
             return []
 
         # Preserve the configured order while suppressing duplicate warnings.
-        return list(dict.fromkeys(c for c in self.categories if c in self.ignore_categories))
+        return list(
+            dict.fromkeys(
+                name
+                for item in self.categories
+                if (name := removal_category_name(item)) in self.ignore_categories
+            )
+        )
 
 
 class RemoveUnregisteredConfig(CategoryFilterConfig):
@@ -293,6 +358,19 @@ class Config(BaseModel):
     qbittorrent: QBittorrentConfig
     trackers: list[TrackerConfig] = Field(min_length=1)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    arrs: dict[str, ArrConfig] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _require_known_arrs(self) -> Config:
+        for job in ("remove_unregistered", "remove_stopped", "maintain_free_space"):
+            cfg = getattr(self.qbittorrent, job)
+            for category in cfg.categories or []:
+                if not isinstance(category, RemovalCategoryConfig):
+                    continue
+                for instance in category.arr_verify_removal:
+                    if instance not in self.arrs:
+                        raise ValueError(f"{job} references unknown Arr instance {instance!r}")
+        return self
 
     def match_tracker(self, tracker_urls: Iterable[str]) -> TrackerConfig | None:
         """Return the first configured tracker matching any of the torrent's tracker URLs."""

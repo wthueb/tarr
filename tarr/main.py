@@ -12,16 +12,20 @@ from pydantic import ValidationError
 from qbittorrentapi.torrents import TorrentStatusesT
 from structlog.contextvars import bound_contextvars
 
+from tarr.arr import removal_allowed
 from tarr.cleanup import cleanup_empty_dirs
 from tarr.config import (
     UNLIMITED,
+    ArrConfig,
     Config,
     QBittorrentConfig,
+    RemovalCategory,
     RemoveStoppedConfig,
     RemoveUnregisteredConfig,
     TrackerConfig,
     category_is_included,
     load_config,
+    removal_category_name,
 )
 from tarr.logging import setup_logging
 
@@ -61,7 +65,7 @@ def build_client(cfg: QBittorrentConfig) -> qbittorrentapi.Client:
 
 def torrents_in_categories(
     client: TorrentsClient,
-    categories: list[str | None] | None,
+    categories: list[RemovalCategory] | None,
     ignore_categories: list[str | None] | None = None,
     status_filter: TorrentStatusesT | None = None,
 ) -> list[qbittorrentapi.TorrentDictionary]:
@@ -70,11 +74,10 @@ def torrents_in_categories(
     else:
         torrents = client.torrents_info(status_filter=status_filter)
     ignored = ignore_categories or []
+    names = [removal_category_name(item) for item in categories] if categories is not None else None
 
     return [
-        torrent
-        for torrent in torrents
-        if category_is_included(torrent.category, categories, ignored)
+        torrent for torrent in torrents if category_is_included(torrent.category, names, ignored)
     ]
 
 
@@ -100,6 +103,7 @@ def remove_unregistered(
     cfg: RemoveUnregisteredConfig,
     unregistered_first_seen: dict[str, datetime.datetime],
     dry_run: bool = False,
+    arrs: dict[str, ArrConfig] | None = None,
 ) -> None:
     log.info("checking for unregistered torrents...")
 
@@ -146,6 +150,10 @@ def remove_unregistered(
                     time_unregistered = now - first_seen
 
                     if time_unregistered >= delay:
+                        if not removal_allowed(
+                            torrent.hash, cfg.arr_instances(torrent.category), arrs or {}
+                        ):
+                            break
                         with bound_contextvars(
                             dry_run=dry_run,
                             delete_files=True,
@@ -176,6 +184,7 @@ def remove_stopped(
     cfg: RemoveStoppedConfig,
     stopped_first_seen: dict[str, datetime.datetime],
     dry_run: bool = False,
+    arrs: dict[str, ArrConfig] | None = None,
 ) -> None:
     log.info("checking for stopped torrents...")
 
@@ -228,6 +237,9 @@ def remove_stopped(
                 if not (seed_time_met or ratio_met):
                     log.debug("torrent does not meet removal criteria")
                     continue
+
+            if not removal_allowed(torrent.hash, cfg.arr_instances(torrent.category), arrs or {}):
+                continue
 
             delete_files = cfg.on_delete == "RemoveWithContent"
             with bound_contextvars(
@@ -400,6 +412,9 @@ def maintain_free_space(
         torrent, tracker = possible_to_remove.pop(0)
 
         with bound_contextvars(**_torrent_context(torrent)):
+            if not removal_allowed(torrent.hash, cfg.arr_instances(torrent.category), config.arrs):
+                continue
+
             with bound_contextvars(
                 dry_run=dry_run,
                 delete_files=True,
@@ -442,6 +457,7 @@ def run(
                 qbittorrent.remove_unregistered,
                 unregistered_first_seen,
                 dry_run,
+                arrs=config.arrs,
             )
 
     if qbittorrent.set_seed_limits.enabled:
@@ -450,7 +466,9 @@ def run(
 
     if qbittorrent.remove_stopped.enabled:
         with bound_contextvars(job="remove_stopped"):
-            remove_stopped(client, qbittorrent.remove_stopped, stopped_first_seen, dry_run)
+            remove_stopped(
+                client, qbittorrent.remove_stopped, stopped_first_seen, dry_run, arrs=config.arrs
+            )
 
     if qbittorrent.maintain_free_space.enabled:
         with bound_contextvars(job="maintain_free_space"):

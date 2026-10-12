@@ -54,7 +54,11 @@ qbittorrent:
     enabled: true
     # only torrents in one of these categories are considered (set to null for all)
     categories:
-      - autobrr
+      - name: autobrr
+      # Use objects to verify every listed Arr queue before removal. Strings and null
+      # are also accepted for categories without verification.
+      # - name: radarr
+      #   arr_verify_removal: [radarr, radarr4k]
     # always exclude these categories, even if they also appear in categories
     ignore_categories: []
     free_space_threshold_gibi: 1024
@@ -100,6 +104,17 @@ qbittorrent:
         use_tracker_limits: true # defaults to true
         default_ratio: 0.5
         action: Stop
+
+# Optional named Radarr/Sonarr instances referenced by arr_verify_removal in any
+# removal job's categories. Hosts may include a reverse-proxy base path.
+arrs: {}
+# arrs:
+#   radarr:
+#     host: http://radarr:7878
+#     api_key: replace-me
+#   radarr4k:
+#     host: http://radarr4k:7878
+#     api_key: replace-me
 
 # seed time and ratio limits are defined per tracker. a torrent is matched to a tracker
 # by its announce hostname. used both for removal eligibility (maintain_free_space) and
