@@ -150,6 +150,15 @@ this order:
 3. The category's `default_*` value.
 4. The job's global `default_*` value.
 
+A category can set `force_use_tracker_limits: [nyaa]` to override that order when
+the torrent's matching tracker has a listed name. Both seed time and ratio then
+come from that tracker, even with explicit category values (`null` or `-1` included)
+or `use_tracker_limits: false`. The category's required `action` is unchanged.
+Names are case-sensitive references to `trackers[].name`; unknown names are rejected
+at startup. The first configured matching tracker is still used, not a later
+tracker solely because it appears in the force list. If that tracker is not listed
+or no tracker matches, normal resolution applies. The list defaults to empty.
+
 An omitted value continues down that chain. An explicit `null` preserves the
 torrent's current value, while `-1` sets an unlimited value. Zero and positive
 numbers are applied as limits. Each category must explicitly specify `action`:

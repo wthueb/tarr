@@ -202,6 +202,7 @@ class SetSeedLimitsCategoryConfig(BaseModel):
     # qBittorrent reports "" for torrents without a category, configured here as null.
     name: str | None
     use_tracker_limits: bool = True
+    force_use_tracker_limits: list[str] = Field(default_factory=list)
     # Explicit limits take precedence over trackers. An explicitly configured null
     # preserves the torrent's current value; an omitted field continues resolution.
     seed_time_minutes: SeedTimeMinutes | None = None
@@ -218,8 +219,12 @@ class SetSeedLimitsCategoryConfig(BaseModel):
 
     @property
     def needs_tracker_limits(self) -> bool:
-        return self.use_tracker_limits and (
-            "seed_time_minutes" not in self.model_fields_set or "ratio" not in self.model_fields_set
+        return bool(self.force_use_tracker_limits) or (
+            self.use_tracker_limits
+            and (
+                "seed_time_minutes" not in self.model_fields_set
+                or "ratio" not in self.model_fields_set
+            )
         )
 
     def resolve_seed_time_minutes(
@@ -227,6 +232,8 @@ class SetSeedLimitsCategoryConfig(BaseModel):
         tracker: TrackerConfig | None,
         global_default: SeedTimeMinutes | None,
     ) -> tuple[SeedTimeMinutes | None, str]:
+        if tracker is not None and tracker.name in self.force_use_tracker_limits:
+            return tracker.seed_time_minutes, f"forced_tracker:{tracker.name}"
         if "seed_time_minutes" in self.model_fields_set:
             return self.seed_time_minutes, "category"
         if self.use_tracker_limits and tracker is not None:
@@ -240,6 +247,8 @@ class SetSeedLimitsCategoryConfig(BaseModel):
         tracker: TrackerConfig | None,
         global_default: Ratio | None,
     ) -> tuple[Ratio | None, str]:
+        if tracker is not None and tracker.name in self.force_use_tracker_limits:
+            return tracker.ratio, f"forced_tracker:{tracker.name}"
         if "ratio" in self.model_fields_set:
             return self.ratio, "category"
         if self.use_tracker_limits and tracker is not None:
@@ -370,6 +379,17 @@ class Config(BaseModel):
                 for instance in category.arr_verify_removal:
                     if instance not in self.arrs:
                         raise ValueError(f"{job} references unknown Arr instance {instance!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _require_known_forced_trackers(self) -> Config:
+        tracker_names = {tracker.name for tracker in self.trackers}
+        for category in self.qbittorrent.set_seed_limits.categories:
+            for name in category.force_use_tracker_limits:
+                if name not in tracker_names:
+                    raise ValueError(
+                        f"force_use_tracker_limits references unknown tracker {name!r}"
+                    )
         return self
 
     def match_tracker(self, tracker_urls: Iterable[str]) -> TrackerConfig | None:

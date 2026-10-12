@@ -98,6 +98,15 @@ qbittorrent:
         seed_time_minutes: -1
         ratio: -1
 
+      # Named matching trackers override both explicit limits, including null/-1,
+      # even with use_tracker_limits: false. Names reference trackers[].name.
+      # Otherwise normal precedence applies. The category action is unchanged.
+      - name: radarr
+        seed_time_minutes: -1
+        ratio: -1
+        force_use_tracker_limits: [Example]
+        action: Stop
+
       # precedence is explicit category limit, tracker, category default, global default
       - name: dontcare
         seed_time_minutes: 0
