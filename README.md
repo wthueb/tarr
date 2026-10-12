@@ -18,7 +18,7 @@ Each job is independent and can be enabled or disabled:
 | --- | --- |
 | `remove_unregistered` | Deletes a torrent and its content after a tracker continuously reports it as unregistered for a configured delay. |
 | `set_seed_limits` | Reconciles qBittorrent ratio, seed-time, limit action, and related share-limit settings for explicitly managed categories. |
-| `remove_stopped` | Removes completed, stopped torrents after a delay only when an active torrent seed-time or ratio limit is met, optionally keeping their downloaded content. Actively seeding torrents are untouched. |
+| `remove_stopped` | Removes completed, stopped torrents after a delay only when an active torrent limit and every matched tracker's required policy are met, optionally keeping downloaded content. |
 | `maintain_free_space` | When disk space is below the target, deletes eligible torrents and their content, rechecking qBittorrent's reported free space after each deletion. |
 | `cleanup_empty_dirs` | Prunes old, empty directories under explicitly configured roots, excluding paths referenced by any current torrent. |
 
@@ -62,7 +62,7 @@ schema. Its top-level sections are:
 - `qbittorrent`: WebUI connection settings only (`host`, `username`, `password`).
 - `remove_unregistered`, `remove_stopped`, `set_seed_limits`, `maintain_free_space`,
   and `cleanup_empty_dirs`: independent job settings.
-- `trackers`: tracker hostnames, minimum seed-time and ratio rules, and deletion priorities.
+- `trackers`: tracker hostnames, required and desired seed limits, and deletion priorities.
 - `arrs`: optional named Radarr/Sonarr connections for removal verification.
 
 Polling and job settings must be at the root; nesting them under `qbittorrent`
@@ -119,64 +119,83 @@ Category names are case-sensitive and must be unique.
 
 ### Trackers and retention
 
-A torrent is associated with the first configured tracker whose `hosts` entry
-matches an announce hostname or its subdomain. Tracker policies provide a
-`seed_time_minutes` and `ratio` value. For free-space cleanup, a torrent becomes
-eligible after satisfying either value; `-1` makes that dimension unlimited, so
-it can never make the torrent eligible.
+Every configured tracker whose `hosts` entry matches an announce hostname or its
+subdomain applies to the torrent. Duplicate announce URLs do not duplicate policies.
+Unknown announces are ignored when at least one configured tracker matches; torrents
+with no configured matches are never removed except by `remove_unregistered`.
 
-`remove_stopped` requires a completed download in `pausedUP` or `stoppedUP`,
-including manually stopped torrents, and at least one satisfied active torrent
-seed-time or ratio limit. It uses qBittorrent's resolved `max_seeding_time` and
-`max_ratio`, including inherited defaults, rather than looking up tracker policies.
-This respects limits applied by `set_seed_limits` as well as manually defined
-limits; no matching configured tracker is required. Unlimited limits cannot make
-a torrent eligible, and torrents with both limits unlimited are kept.
-Its delay starts when the completed torrent is first observed stopped and resets
-if it resumes or is no longer completed. A passed delay never bypasses the limits.
+Each tracker requires `required` and `desired` blocks containing both
+`seed_time_minutes` and `ratio`. Required limits guard removal; desired limits
+control qBittorrent share limits. For **each** matched tracker, a torrent must reach
+its required seed time **OR** required ratio. **Every** matched tracker must pass,
+though different trackers can pass via different dimensions. Thresholds are
+inclusive. `-1` means unlimited and never qualifies that dimension for removal;
+both required limits unlimited prevent removal. qBittorrent's achieved ratio of
+`-1` represents infinite ratio and satisfies finite ratio requirements.
 
-When free-space cleanup is needed, unmanaged trackers and excluded categories are skipped.
-Eligible torrents are ordered by their tracker's `delete_priority`, highest first,
-then by total swarm seeder count, highest first. Each tracker defaults to
-`delete_priority: 0`; positive and negative integers are supported. Priority only
-controls deletion order, never eligibility. With equal priorities, the existing
-most-seeded-first behavior is preserved. Torrents are deleted with their content
-until qBittorrent reports enough free space or no eligible torrents remain. Free space is re-read after each deletion, so removing a hard link
-is not assumed to reclaim the torrent's size while other links remain. Dry runs
-still estimate reclaimed space from torrent sizes because nothing is deleted.
+At startup, each desired field must be **greater than or equal to** its corresponding
+required field, treating unlimited as greater than finite values. Equality is allowed,
+including `0/0` and unlimited/unlimited. Limits must be nonnegative or `-1`, seed times
+must be integer minutes, and configured ratios must be finite. Unsafe values stop
+startup before connecting to qBittorrent, even if the relevant job is disabled.
+The previous flat tracker limits and category precedence fields are not supported.
+
+`remove_stopped` additionally requires a completed download in `pausedUP` or
+`stoppedUP`, a continuously elapsed stopped delay, and at least one satisfied active
+qBittorrent seed-time or ratio limit. Its active check uses resolved `max_seeding_time`
+and `max_ratio`, including inherited defaults and manually defined limits. Both
+active limits unlimited keep the torrent even after required policies pass. Active
+limits, manual stops, and delays never bypass required tracker policies. The delay
+resets if the torrent resumes or is no longer completed; actively seeding torrents
+are untouched.
+
+Free-space cleanup uses required policies, not desired limits or category overrides.
+Its effective `delete_priority` is the **minimum across all matched trackers**.
+Eligible torrents are ordered by effective priority descending, then total swarm
+seeder count descending. Each tracker defaults to priority zero; positive and negative
+integers are supported. A torrent matching priorities `1000` and `-500` has effective
+priority `-500`, so a priority-zero torrent is removed first. Priority never bypasses
+eligibility. Logs include all matched tracker names and the effective priority.
+
+Torrents are deleted with content until qBittorrent reports enough free space or no
+eligible torrents remain. Free space is re-read after each deletion, so removing a
+hard link is not assumed to reclaim space while other links remain. Dry runs estimate
+reclaimed space from torrent sizes. Tracker lookup failures or missing/malformed
+eligibility data cannot authorize removal. Arr verification still applies.
 
 ### Share limits
 
-For each managed category, seed time and ratio are resolved independently in
-this order:
+For managed categories with at least one configured tracker match, `set_seed_limits`
+uses the maximum desired seed time and maximum desired ratio across all matches.
+Unlimited dominates finite values. A complete category `override` replaces both:
 
-1. An explicit category value.
-2. The matching tracker value when `use_tracker_limits` is enabled.
-3. The category's `default_*` value.
-4. Preserve the torrent's current value.
+```yaml
+set_seed_limits:
+  enabled: true
+  categories:
+    - name: upload
+      action: Stop
+      override:
+        seed_time_minutes: -1
+        ratio: -1
+```
 
-Job-level `set_seed_limits.default_seed_time_minutes` and `set_seed_limits.default_ratio`
-are not supported and are rejected; defaults can only be set per category.
+Both override fields are mandatory and cannot be null. Each must be at least every
+configured tracker's corresponding required value, even for `Stop` actions or disabled
+jobs; unsafe overrides stop startup. Omit `override` (or set it to null) to use desired
+tracker limits. Unlisted categories and torrents without any configured tracker match
+are skipped entirely, even when an override exists. Their existing settings, including
+any autonomous qBittorrent deletion behavior, remain untouched.
 
-A category can set `force_use_tracker_limits: [nyaa]` to override that order when
-the torrent's matching tracker has a listed name. Both seed time and ratio then
-come from that tracker, even with explicit category values (`null` or `-1` included)
-or `use_tracker_limits: false`. The category's required `action` is unchanged.
-Names are case-sensitive references to `trackers[].name`; unknown names are rejected
-at startup. The first configured matching tracker is still used, not a later
-tracker solely because it appears in the force list. If that tracker is not listed
-or no tracker matches, normal resolution applies. The list defaults to empty.
+Each category requires `action`: `Default`, `Stop`, `Remove`, `RemoveWithContent`, or
+`EnableSuperSeeding`. There is no global action or inheritance. Flat category limits,
+`use_tracker_limits`, `force_use_tracker_limits`, and `default_*` fields are rejected.
 
-An omitted value continues down that chain. An explicit `null` preserves the
-torrent's current value, while `-1` sets an unlimited value. Zero and positive
-numbers are applied as limits. Each category must explicitly specify `action`:
-`Default`, `Stop`, `Remove`, `RemoveWithContent`, or `EnableSuperSeeding`. There is
-no global action or inheritance; a missing/null category action or a job-level
-`action` is rejected.
-
-The job also sets the inactive-seeding limit to unlimited and uses `MatchAny`
-semantics. qBittorrent versions before 5.3 already use those semantics implicitly.
-No API update is sent when a torrent already matches the resolved state.
+The job also sets inactive-seeding time to unlimited and uses `MatchAny` semantics;
+qBittorrent versions before 5.3 use these implicitly. Validated effective limits cannot
+trigger deletion below matched tracker requirements. No API update is sent when the
+resolved state already matches. These safeguards govern tarr's deletions and settings
+it applies, not autonomous actions on untouched torrents or deletions by other tools.
 
 ### Empty directory cleanup
 

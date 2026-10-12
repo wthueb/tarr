@@ -43,9 +43,10 @@ remove_unregistered:
 # remove torrents after they have continuously appeared as completed and stopped for
 # `delay_minutes`. actively seeding torrents are left alone; tracking starts when
 # tarr first observes a completed torrent in a stopped state. removal also requires
-# reaching the torrent's active qBittorrent seed-time OR ratio limit; -1 is unlimited.
+# reaching the torrent's active qBittorrent seed-time OR ratio limit AND satisfying
+# every matched tracker's required policy. No matching tracker means no removal.
 # inherited defaults, manually defined limits, and limits applied by set_seed_limits
-# are respected. set_seed_limits runs first; no matching tracker is required.
+# are respected. set_seed_limits runs first; -1 is unlimited.
 remove_stopped:
   enabled: false
   delay_minutes: 15
@@ -57,44 +58,33 @@ remove_stopped:
   # Remove keeps downloaded files; RemoveWithContent deletes them
   on_delete: Remove
 
-# reconcile qBittorrent share limits for the categories listed below. configured limits
-# replace different torrent values; null means preserve the current value and -1 means
-# unlimited.
+# reconcile qBittorrent share limits for the categories listed below. Use each matched
+# tracker's desired limits, taking the maximum per dimension (-1 means unlimited).
+# A complete category override takes precedence. No tracker match means no changes.
 set_seed_limits:
   enabled: true
   # Each category requires action: Default, Stop, Remove, RemoveWithContent,
   # or EnableSuperSeeding. There is no global action or inheritance.
   categories:
-    # use matching tracker limits; preserve current limits if no tracker matches
     - name: cross
       action: RemoveWithContent
 
-    # category limits take precedence over matching trackers
+    # Overrides require both fields, each at least every configured tracker's
+    # corresponding required limit. -1 is unlimited and passes that comparison.
     - name: upload
       action: Stop
-      seed_time_minutes: -1
-      ratio: -1
+      override:
+        seed_time_minutes: -1
+        ratio: -1
 
-    # Named matching trackers override both explicit limits, including null/-1,
-    # even with use_tracker_limits: false. Names reference trackers[].name.
-    # Otherwise normal precedence applies. The category action is unchanged.
+    # Use Stop for Arr-verified categories; tarr performs guarded removal later.
     - name: radarr
-      seed_time_minutes: -1
-      ratio: -1
-      force_use_tracker_limits: [Example]
-      action: Stop
-
-    # precedence is explicit category limit, tracker, category default, current value
-    - name: dontcare
-      seed_time_minutes: 0
-      use_tracker_limits: true # defaults to true
-      default_ratio: 0.5
       action: Stop
 
 # once free space drops below `free_space_threshold_gibi`, remove eligible torrents
-# (highest tracker delete_priority first, then most swarm seeders) until the threshold
-# is met. a torrent is eligible once it has seeded longer than its tracker's
-# `seed_time_minutes` OR reached its `ratio`.
+# (highest effective delete_priority first, then most swarm seeders) until the threshold
+# is met. Effective priority is the MINIMUM across all matched trackers. Every matched
+# tracker must pass its required seed-time OR ratio policy. No match means no removal.
 maintain_free_space:
   enabled: true
   # only torrents in one of these categories are considered (set to null for all)
@@ -123,16 +113,21 @@ cleanup_empty_dirs:
   name_pattern: "*--????????"
   min_age_minutes: 60
 
-# seed time and ratio limits are defined per tracker. a torrent is matched to a tracker
-# by its announce hostname. used both for removal eligibility (maintain_free_space) and
-# for the limits applied by set_seed_limits. use -1 for either value to mean unlimited
-# (that dimension never triggers removal / is set to "no limit" in qBittorrent).
+# All configured trackers matching an announce hostname (including subdomains) apply.
+# Required limits guard tarr removals except remove_unregistered. Desired limits are
+# applied by set_seed_limits. Each desired field must be >= its corresponding required
+# field at startup; equality is allowed. -1 means unlimited (greater than finite values),
+# and that dimension never qualifies a torrent for removal. Both unlimited prevent removal.
 trackers:
   - name: Example
     hosts:
       - tracker.example.org
-    seed_time_minutes: 20160 # 14 days
-    ratio: 2.0
-    # higher values are deleted first by maintain_free_space; defaults to 0.
-    # negative values are allowed. priority never bypasses seed-time or ratio eligibility.
+    required:
+      seed_time_minutes: 10080 # 7 days
+      ratio: 1.0
+    desired:
+      seed_time_minutes: 20160 # 14 days
+      ratio: 2.0
+    # Effective priority is the minimum across matches; higher values are deleted first.
+    # Defaults to 0; negative values are allowed. Priority never bypasses eligibility.
     delete_priority: 0

@@ -23,7 +23,7 @@ class FakeClient:
 
 
 def make_config(**remove_stopped):
-    return RemoveStoppedConfig.model_validate(remove_stopped)
+    return make_run_config(**remove_stopped)
 
 
 def make_run_config(*, seed_time_minutes=1, ratio=1, **remove_stopped):
@@ -39,8 +39,8 @@ def make_run_config(*, seed_time_minutes=1, ratio=1, **remove_stopped):
                 {
                     "name": "example",
                     "hosts": ["tracker.example.com"],
-                    "seed_time_minutes": seed_time_minutes,
-                    "ratio": ratio,
+                    "required": {"seed_time_minutes": 0, "ratio": 0},
+                    "desired": {"seed_time_minutes": seed_time_minutes, "ratio": ratio},
                 }
             ],
         }
@@ -174,28 +174,28 @@ def test_stopped_removal_requires_either_active_torrent_target(
         assert first_seen == {torrent.hash: observed_at}
 
 
-def test_stopped_torrent_without_matching_tracker_is_removed_when_active_target_is_met():
+def test_stopped_torrent_without_matching_tracker_is_kept_when_active_target_is_met():
     torrent = make_torrent(tracker_url="https://unknown.example/announce")
 
     remove_stopped(FakeClient([torrent]), make_config(), {})
 
-    torrent.delete.assert_called_once_with(delete_files=False)
+    torrent.delete.assert_not_called()
 
 
-def test_stopped_removal_does_not_access_trackers():
+def test_stopped_removal_without_tracker_data_fails_closed():
     torrent = make_torrent()
     del torrent.trackers
 
     remove_stopped(FakeClient([torrent]), make_config(), {})
 
-    torrent.delete.assert_called_once_with(delete_files=False)
+    torrent.delete.assert_not_called()
 
 
 @pytest.mark.parametrize(
     ("active_time_limit", "active_ratio_limit", "removed"),
     [(10, 2, False), (1, 1, True)],
 )
-def test_run_uses_active_limits_instead_of_tracker_targets(
+def test_run_uses_active_limits_instead_of_tracker_desired_targets(
     active_time_limit, active_ratio_limit, removed
 ):
     torrent = make_torrent(max_seeding_time=active_time_limit, max_ratio=active_ratio_limit)

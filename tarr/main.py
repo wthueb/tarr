@@ -20,7 +20,6 @@ from tarr.config import (
     Config,
     QBittorrentConfig,
     RemovalCategory,
-    RemoveStoppedConfig,
     RemoveUnregisteredConfig,
     TrackerConfig,
     category_is_included,
@@ -28,6 +27,7 @@ from tarr.config import (
     removal_category_name,
 )
 from tarr.logging import setup_logging
+from tarr.seed_limits import desired_limits, limits_met, matched_trackers, required_limits_met
 
 log = structlog.stdlib.get_logger("tarr")
 
@@ -180,12 +180,12 @@ def remove_unregistered(
 
 def remove_stopped(
     client: TorrentsClient,
-    cfg: RemoveStoppedConfig,
+    config: Config,
     stopped_first_seen: dict[str, datetime.datetime],
     dry_run: bool = False,
-    arrs: dict[str, ArrConfig] | None = None,
 ) -> None:
     log.info("checking for stopped torrents...")
+    cfg = config.remove_stopped
 
     completed_torrents = torrents_in_categories(
         client,
@@ -221,23 +221,27 @@ def remove_stopped(
                     log.debug("stopped torrent removal delayed")
                 continue
 
-            seed_time_met = torrent.max_seeding_time >= 0 and (
-                torrent.seeding_time >= torrent.max_seeding_time * 60
-            )
-            ratio_met = torrent.max_ratio >= 0 and (
-                torrent.ratio == -1 or torrent.ratio >= torrent.max_ratio
+            trackers = matched_trackers(config, torrent)
+            if not required_limits_met(torrent, trackers):
+                continue
+
+            active_limits_met = limits_met(
+                getattr(torrent, "seeding_time", None),
+                getattr(torrent, "ratio", None),
+                getattr(torrent, "max_seeding_time", None),
+                getattr(torrent, "max_ratio", None),
             )
             with bound_contextvars(
                 seeding_time_seconds=torrent.seeding_time,
                 torrent_ratio=torrent.ratio,
-                minimum_seed_time_minutes=torrent.max_seeding_time,
-                minimum_ratio=torrent.max_ratio,
+                minimum_seed_time_minutes=getattr(torrent, "max_seeding_time", None),
+                minimum_ratio=getattr(torrent, "max_ratio", None),
             ):
-                if not (seed_time_met or ratio_met):
+                if not active_limits_met:
                     log.debug("torrent does not meet removal criteria")
                     continue
 
-            if not removal_allowed(torrent.hash, cfg.arr_instances(torrent.category), arrs or {}):
+            if not removal_allowed(torrent.hash, cfg.arr_instances(torrent.category), config.arrs):
                 continue
 
             delete_files = cfg.on_delete == "RemoveWithContent"
@@ -276,18 +280,13 @@ def set_seed_limits(
                 log.debug("torrent category is not managed; skipping")
                 continue
 
-            tracker = (
-                config.match_tracker(t.url for t in torrent.trackers)
-                if category_cfg.needs_tracker_limits
-                else None
-            )
-            seed_time_minutes, seed_time_source = category_cfg.resolve_seed_time_minutes(tracker)
-            ratio, ratio_source = category_cfg.resolve_ratio(tracker)
-
-            target_seed_time = (
-                torrent.seeding_time_limit if seed_time_minutes is None else seed_time_minutes
-            )
-            target_ratio = torrent.ratio_limit if ratio is None else ratio
+            trackers = matched_trackers(config, torrent)
+            if not trackers:
+                continue
+            limits = category_cfg.override or desired_limits(trackers)
+            limit_source = "category_override" if category_cfg.override is not None else "trackers"
+            target_seed_time = limits.seed_time_minutes
+            target_ratio = limits.ratio
             target_action = category_cfg.action
             target_inactive_seed_time = UNLIMITED
             target_mode = "MatchAny"
@@ -315,10 +314,11 @@ def set_seed_limits(
                 dry_run=dry_run,
                 ratio_limit_current=torrent.ratio_limit,
                 ratio_limit_target=target_ratio,
-                ratio_limit_source=ratio_source,
+                ratio_limit_source=limit_source,
+                trackers=[tracker.name for tracker in trackers],
                 seeding_time_limit_current=torrent.seeding_time_limit,
                 seeding_time_limit_target=target_seed_time,
-                seeding_time_limit_source=seed_time_source,
+                seeding_time_limit_source=limit_source,
                 inactive_seeding_time_limit_current=torrent.inactive_seeding_time_limit,
                 inactive_seeding_time_limit_target=target_inactive_seed_time,
                 share_limit_action_current=torrent.share_limit_action,
@@ -356,57 +356,35 @@ def maintain_free_space(
     free_space = client.sync_maindata().server_state.free_space_on_disk
     threshold = cfg.free_space_threshold_bytes
 
-    if free_space > threshold:
+    if free_space >= threshold:
         with bound_contextvars(free_space_bytes=free_space, threshold_bytes=threshold):
             log.info("free space above threshold; nothing to do")
         return
 
-    possible_to_remove: list[tuple[qbittorrentapi.TorrentDictionary, TrackerConfig]] = []
+    possible_to_remove: list[tuple[qbittorrentapi.TorrentDictionary, list[TrackerConfig], int]] = []
 
     for torrent in torrents:
         with bound_contextvars(**_torrent_context(torrent)):
-            tracker = config.match_tracker(t.url for t in torrent.trackers)
-
-            if tracker is None:
-                log.warn("torrent is not managed by a configured tracker; skipping")
+            trackers = matched_trackers(config, torrent)
+            if not trackers:
                 continue
-
-            seeding_time = datetime.timedelta(seconds=torrent.seeding_time)
-
+            delete_priority = min(tracker.delete_priority for tracker in trackers)
             with bound_contextvars(
-                tracker=tracker.name,
-                delete_priority=tracker.delete_priority,
-                torrent_ratio=torrent.ratio,
-                uploaded_bytes=torrent.uploaded,
-                seeding_time_seconds=torrent.seeding_time,
-                torrent_seeders=torrent.num_complete,
-                minimum_seed_time_minutes=tracker.seed_time_minutes,
-                minimum_ratio=tracker.ratio,
+                trackers=[tracker.name for tracker in trackers],
+                delete_priority=delete_priority,
             ):
                 log.debug("checking torrent removal eligibility")
-
-                # a torrent is eligible for removal once it has met either the seed-time or the
-                # ratio minimum. a limit of -1 (unlimited) means that dimension is never met.
-                seed_time_met = tracker.seed_time_minutes != UNLIMITED and (
-                    seeding_time > datetime.timedelta(minutes=tracker.seed_time_minutes)
-                )
-                ratio_met = tracker.ratio != UNLIMITED and torrent.ratio >= tracker.ratio
-
-                if not (seed_time_met or ratio_met):
-                    log.debug("torrent does not meet removal criteria")
+                if not required_limits_met(torrent, trackers):
                     continue
+            possible_to_remove.append((torrent, trackers, delete_priority))
 
-            possible_to_remove.append((torrent, tracker))
-
-    possible_to_remove.sort(
-        key=lambda item: (item[1].delete_priority, item[0].num_complete), reverse=True
-    )
+    possible_to_remove.sort(key=lambda item: (item[2], item[0].num_complete), reverse=True)
 
     with bound_contextvars(eligible_torrent_count=len(possible_to_remove)):
         log.debug("identified torrents meeting removal criteria")
 
     while possible_to_remove and free_space < threshold:
-        torrent, tracker = possible_to_remove.pop(0)
+        torrent, trackers, delete_priority = possible_to_remove.pop(0)
 
         with bound_contextvars(**_torrent_context(torrent)):
             if not removal_allowed(torrent.hash, cfg.arr_instances(torrent.category), config.arrs):
@@ -415,8 +393,8 @@ def maintain_free_space(
             with bound_contextvars(
                 dry_run=dry_run,
                 delete_files=True,
-                tracker=tracker.name,
-                delete_priority=tracker.delete_priority,
+                trackers=[tracker.name for tracker in trackers],
+                delete_priority=delete_priority,
                 torrent_ratio=torrent.ratio,
                 uploaded_bytes=torrent.uploaded,
                 seeding_time_seconds=torrent.seeding_time,
@@ -461,9 +439,7 @@ def run(
 
     if config.remove_stopped.enabled:
         with bound_contextvars(job="remove_stopped"):
-            remove_stopped(
-                client, config.remove_stopped, stopped_first_seen, dry_run, arrs=config.arrs
-            )
+            remove_stopped(client, config, stopped_first_seen, dry_run)
 
     if config.maintain_free_space.enabled:
         with bound_contextvars(job="maintain_free_space"):
@@ -498,7 +474,11 @@ def main():
     except FileNotFoundError:
         raise SystemExit(f"config file not found: {args.config}")
     except ValidationError as e:
-        raise SystemExit(f"invalid config file {args.config}:\n{e}")
+        errors = "\n".join(
+            f"{'.'.join(str(part) for part in error['loc']) or 'config'}: {error['msg']}"
+            for error in e.errors(include_input=False, include_url=False)
+        )
+        raise SystemExit(f"invalid config file {args.config}:\n{errors}") from None
 
     setup_logging(config.logging)
     warn_category_overlaps(config)

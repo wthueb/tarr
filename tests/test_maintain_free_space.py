@@ -45,8 +45,8 @@ def make_config(threshold=3, *, trackers=None, **filters):
                 {
                     "name": "example",
                     "hosts": ["tracker.example.com"],
-                    "seed_time_minutes": 1,
-                    "ratio": 1,
+                    "required": {"seed_time_minutes": 1, "ratio": 1},
+                    "desired": {"seed_time_minutes": 1, "ratio": 1},
                 }
             ],
         }
@@ -103,8 +103,8 @@ def test_orders_by_tracker_priority_then_swarm_seeders(monkeypatch, dry_run):
             {
                 "name": name,
                 "hosts": [f"{name}.example.com"],
-                "seed_time_minutes": 1,
-                "ratio": 1,
+                "required": {"seed_time_minutes": 1, "ratio": 1},
+                "desired": {"seed_time_minutes": 1, "ratio": 1},
                 **({"delete_priority": priority} if priority is not None else {}),
             }
             for name, priority in [("high", 10), ("also_high", 10), ("default", None), ("low", -10)]
@@ -140,12 +140,12 @@ def test_orders_by_tracker_priority_then_swarm_seeders(monkeypatch, dry_run):
     ]
     assert [context["torrent"] for context in selected] == expected
     assert [context["delete_priority"] for context in selected] == [10, 10, 10, 0, -10]
-    assert [context["tracker"] for context in selected] == [
-        "also_high",
-        "high",
-        "high",
-        "default",
-        "low",
+    assert [context["trackers"] for context in selected] == [
+        ["also_high"],
+        ["high"],
+        ["high"],
+        ["default"],
+        ["low"],
     ]
     assert deleted == ([] if dry_run else expected)
     assert client.space_reads == (1 if dry_run else 6)
@@ -164,8 +164,8 @@ def test_high_tracker_priority_does_not_bypass_eligibility_or_category_filters()
             {
                 "name": name,
                 "hosts": [f"{name}.example.com"],
-                "seed_time_minutes": 1,
-                "ratio": 1,
+                "required": {"seed_time_minutes": 1, "ratio": 1},
+                "desired": {"seed_time_minutes": 1, "ratio": 1},
                 "delete_priority": priority,
             }
             for name, priority in [("high", 100), ("low", 0)]

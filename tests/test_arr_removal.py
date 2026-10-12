@@ -196,8 +196,8 @@ def make_config(job, *, categories=None):
                 {
                     "name": "example",
                     "hosts": ["tracker.example"],
-                    "seed_time_minutes": 0,
-                    "ratio": 0,
+                    "required": {"seed_time_minutes": 0, "ratio": 0},
+                    "desired": {"seed_time_minutes": 0, "ratio": 0},
                 }
             ],
             "arrs": ARRS,
@@ -312,8 +312,8 @@ def test_ineligible_torrents_are_not_queried(monkeypatch, job):
     check = Mock()
     monkeypatch.setattr("tarr.arr.torrent_in_queue", check)
     config = make_config(job)
-    config.trackers[0].ratio = 1
-    config.trackers[0].seed_time_minutes = 1
+    config.trackers[0].required.ratio = 1
+    config.trackers[0].required.seed_time_minutes = 1
 
     run(cast(qbittorrentapi.Client, FakeClient([torrent])), config, {})
 

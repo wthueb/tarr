@@ -43,15 +43,34 @@ def category_is_included(
     return (categories is None or category in categories) and category not in ignore_categories
 
 
+class SeedLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    seed_time_minutes: SeedTimeMinutes
+    ratio: Ratio = Field(allow_inf_nan=False)
+
+
+def limit_at_least(value: float, minimum: float) -> bool:
+    return value == UNLIMITED or (minimum != UNLIMITED and value >= minimum)
+
+
 class TrackerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    # announce hostnames that identify this tracker (e.g. tracker.example.org)
     hosts: list[str] = Field(min_length=1)
-    seed_time_minutes: SeedTimeMinutes
-    ratio: Ratio
+    required: SeedLimits
+    desired: SeedLimits
     delete_priority: int = 0
+
+    @model_validator(mode="after")
+    def _validate_desired_limits(self) -> TrackerConfig:
+        for field in ("seed_time_minutes", "ratio"):
+            if not limit_at_least(getattr(self.desired, field), getattr(self.required, field)):
+                raise ValueError(
+                    f"tracker {self.name!r}: desired.{field} must be at least required.{field}"
+                )
+        return self
 
     def matches(self, hostname: str) -> bool:
         hostname = hostname.lower()
@@ -201,59 +220,13 @@ class SetSeedLimitsCategoryConfig(BaseModel):
 
     # qBittorrent reports "" for torrents without a category, configured here as null.
     name: str | None
-    use_tracker_limits: bool = True
-    force_use_tracker_limits: list[str] = Field(default_factory=list)
-    # Explicit limits take precedence over trackers. An explicitly configured null
-    # preserves the torrent's current value; an omitted field continues resolution.
-    seed_time_minutes: SeedTimeMinutes | None = None
-    ratio: Ratio | None = None
-    # Category defaults are used after tracker limits.
-    default_seed_time_minutes: SeedTimeMinutes | None = None
-    default_ratio: Ratio | None = None
+    override: SeedLimits | None = None
     action: ShareLimitAction
 
     @field_validator("name")
     @classmethod
     def _normalize_uncategorized_name(cls, value: str | None) -> str | None:
         return None if value == "" else value
-
-    @property
-    def needs_tracker_limits(self) -> bool:
-        return bool(self.force_use_tracker_limits) or (
-            self.use_tracker_limits
-            and (
-                "seed_time_minutes" not in self.model_fields_set
-                or "ratio" not in self.model_fields_set
-            )
-        )
-
-    def resolve_seed_time_minutes(
-        self,
-        tracker: TrackerConfig | None,
-    ) -> tuple[SeedTimeMinutes | None, str]:
-        if tracker is not None and tracker.name in self.force_use_tracker_limits:
-            return tracker.seed_time_minutes, f"forced_tracker:{tracker.name}"
-        if "seed_time_minutes" in self.model_fields_set:
-            return self.seed_time_minutes, "category"
-        if self.use_tracker_limits and tracker is not None:
-            return tracker.seed_time_minutes, f"tracker:{tracker.name}"
-        if "default_seed_time_minutes" in self.model_fields_set:
-            return self.default_seed_time_minutes, "category_default"
-        return None, "current"
-
-    def resolve_ratio(
-        self,
-        tracker: TrackerConfig | None,
-    ) -> tuple[Ratio | None, str]:
-        if tracker is not None and tracker.name in self.force_use_tracker_limits:
-            return tracker.ratio, f"forced_tracker:{tracker.name}"
-        if "ratio" in self.model_fields_set:
-            return self.ratio, "category"
-        if self.use_tracker_limits and tracker is not None:
-            return tracker.ratio, f"tracker:{tracker.name}"
-        if "default_ratio" in self.model_fields_set:
-            return self.default_ratio, "category_default"
-        return None, "current"
 
 
 class SetSeedLimitsConfig(BaseModel):
@@ -378,25 +351,29 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _require_known_forced_trackers(self) -> Config:
-        tracker_names = {tracker.name for tracker in self.trackers}
+    def _validate_category_overrides(self) -> Config:
         for category in self.set_seed_limits.categories:
-            for name in category.force_use_tracker_limits:
-                if name not in tracker_names:
-                    raise ValueError(
-                        f"force_use_tracker_limits references unknown tracker {name!r}"
-                    )
+            if category.override is None:
+                continue
+            for tracker in self.trackers:
+                for field in ("seed_time_minutes", "ratio"):
+                    if not limit_at_least(
+                        getattr(category.override, field), getattr(tracker.required, field)
+                    ):
+                        raise ValueError(
+                            f"category {category.name!r}: override.{field} must be at least "
+                            f"tracker {tracker.name!r} required.{field}"
+                        )
         return self
 
-    def match_tracker(self, tracker_urls: Iterable[str]) -> TrackerConfig | None:
-        """Return the first configured tracker matching any of the torrent's tracker URLs."""
+    def match_trackers(self, tracker_urls: Iterable[str]) -> list[TrackerConfig]:
+        """Return every matching configured tracker once, in configuration order."""
         hostnames = [h for url in tracker_urls if (h := urlparse(url).hostname)]
-
-        for tracker in self.trackers:
-            if any(tracker.matches(hostname) for hostname in hostnames):
-                return tracker
-
-        return None
+        return [
+            tracker
+            for tracker in self.trackers
+            if any(tracker.matches(hostname) for hostname in hostnames)
+        ]
 
 
 def load_config(path: pathlib.Path) -> Config:

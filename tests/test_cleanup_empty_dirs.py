@@ -238,7 +238,12 @@ def run_config(**job):
             },
             "cleanup_empty_dirs": job,
             "trackers": [
-                {"name": "example", "hosts": ["example.org"], "seed_time_minutes": 1, "ratio": 1}
+                {
+                    "name": "example",
+                    "hosts": ["example.org"],
+                    "required": {"seed_time_minutes": 1, "ratio": 1},
+                    "desired": {"seed_time_minutes": 1, "ratio": 1},
+                }
             ],
         }
     )

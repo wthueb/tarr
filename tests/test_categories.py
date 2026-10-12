@@ -83,8 +83,8 @@ def test_startup_warning_names_overlapping_categories():
                 {
                     "name": "example",
                     "hosts": ["tracker.example.com"],
-                    "seed_time_minutes": 1,
-                    "ratio": 1,
+                    "required": {"seed_time_minutes": 1, "ratio": 1},
+                    "desired": {"seed_time_minutes": 1, "ratio": 1},
                 }
             ],
         }

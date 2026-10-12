@@ -28,8 +28,8 @@ def minimal_config() -> dict:
             {
                 "name": "example",
                 "hosts": ["tracker.example.com"],
-                "seed_time_minutes": 1,
-                "ratio": 1,
+                "required": {"seed_time_minutes": 1, "ratio": 1},
+                "desired": {"seed_time_minutes": 1, "ratio": 1},
             }
         ],
     }
@@ -109,8 +109,8 @@ def test_daemon_uses_root_polling_interval(tmp_path, monkeypatch):
         "trackers:\n"
         "  - name: example\n"
         "    hosts: [tracker.example.com]\n"
-        "    seed_time_minutes: 1\n"
-        "    ratio: 1\n"
+        "    required: {seed_time_minutes: 1, ratio: 1}\n"
+        "    desired: {seed_time_minutes: 1, ratio: 1}\n"
     )
     client = Mock()
     run = Mock()
