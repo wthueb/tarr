@@ -33,11 +33,11 @@ def make_config(threshold=3, *, trackers=None, **filters):
                 "host": "localhost",
                 "username": "user",
                 "password": "pass",
-                "maintain_free_space": {
-                    "enabled": True,
-                    "free_space_threshold_gibi": threshold,
-                    **filters,
-                },
+            },
+            "maintain_free_space": {
+                "enabled": True,
+                "free_space_threshold_gibi": threshold,
+                **filters,
             },
             "trackers": trackers
             if trackers is not None

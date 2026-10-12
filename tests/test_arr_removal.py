@@ -179,18 +179,18 @@ def make_config(job, *, categories=None):
                 "host": "localhost",
                 "username": "user",
                 "password": "pass",
-                job: {
-                    "enabled": True,
-                    "categories": categories
-                    if categories is not None
-                    else [
-                        {
-                            "name": "radarr",
-                            "arr_verify_removal": ["movies", "movies4k"],
-                        }
-                    ],
-                    **({"free_space_threshold_gibi": 2} if job == "maintain_free_space" else {}),
-                },
+            },
+            job: {
+                "enabled": True,
+                "categories": categories
+                if categories is not None
+                else [
+                    {
+                        "name": "radarr",
+                        "arr_verify_removal": ["movies", "movies4k"],
+                    }
+                ],
+                **({"free_space_threshold_gibi": 2} if job == "maintain_free_space" else {}),
             },
             "trackers": [
                 {
@@ -268,8 +268,8 @@ def test_free_space_skips_queued_torrent_and_continues_without_counting_its_spac
     check = Mock(return_value=True)
     monkeypatch.setattr("tarr.arr.torrent_in_queue", check)
     config = make_config("maintain_free_space")
-    config.qbittorrent.maintain_free_space.free_space_threshold_gibi = 1
-    config.qbittorrent.maintain_free_space.categories.append("cross")
+    config.maintain_free_space.free_space_threshold_gibi = 1
+    config.maintain_free_space.categories.append("cross")
 
     with capture_logs() as logs:
         run(
@@ -293,7 +293,7 @@ def test_ignored_torrents_are_not_queried(monkeypatch, job):
     check = Mock()
     monkeypatch.setattr("tarr.arr.torrent_in_queue", check)
     config = make_config(job)
-    getattr(config.qbittorrent, job).ignore_categories = ["radarr"]
+    getattr(config, job).ignore_categories = ["radarr"]
 
     run(cast(qbittorrentapi.Client, FakeClient([torrent])), config, {})
 
@@ -344,7 +344,7 @@ def test_uncategorized_removal_object_is_normalized(name):
     config = make_config(
         "remove_stopped", categories=[{"name": name, "arr_verify_removal": ["movies"]}]
     )
-    cfg = config.qbittorrent.remove_stopped
+    cfg = config.remove_stopped
 
     assert cfg.includes_category("")
     assert cfg.arr_instances("") == ["movies"]
@@ -363,14 +363,14 @@ def test_duplicate_category_entries_combine_verification_instances():
         ],
     )
 
-    assert config.qbittorrent.remove_stopped.arr_instances("radarr") == ["movies", "movies4k"]
+    assert config.remove_stopped.arr_instances("radarr") == ["movies", "movies4k"]
 
 
 def test_verification_does_not_apply_to_other_jobs():
     config = make_config("remove_stopped")
 
-    assert config.qbittorrent.remove_unregistered.arr_instances("radarr") == []
-    assert config.qbittorrent.maintain_free_space.arr_instances("radarr") == []
+    assert config.remove_unregistered.arr_instances("radarr") == []
+    assert config.maintain_free_space.arr_instances("radarr") == []
 
 
 @pytest.mark.parametrize(

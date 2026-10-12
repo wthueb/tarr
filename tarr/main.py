@@ -82,11 +82,10 @@ def torrents_in_categories(
 
 
 def warn_category_overlaps(config: Config) -> None:
-    qbittorrent = config.qbittorrent
     feature_configs = (
-        ("remove_unregistered", qbittorrent.remove_unregistered),
-        ("remove_stopped", qbittorrent.remove_stopped),
-        ("maintain_free_space", qbittorrent.maintain_free_space),
+        ("remove_unregistered", config.remove_unregistered),
+        ("remove_stopped", config.remove_stopped),
+        ("maintain_free_space", config.maintain_free_space),
     )
 
     for feature_name, cfg in feature_configs:
@@ -266,7 +265,7 @@ def set_seed_limits(
     config: Config,
     dry_run: bool = False,
 ) -> None:
-    cfg = config.qbittorrent.set_seed_limits
+    cfg = config.set_seed_limits
 
     log.info("setting seed limits...")
 
@@ -282,10 +281,8 @@ def set_seed_limits(
                 if category_cfg.needs_tracker_limits
                 else None
             )
-            seed_time_minutes, seed_time_source = category_cfg.resolve_seed_time_minutes(
-                tracker, cfg.default_seed_time_minutes
-            )
-            ratio, ratio_source = category_cfg.resolve_ratio(tracker, cfg.default_ratio)
+            seed_time_minutes, seed_time_source = category_cfg.resolve_seed_time_minutes(tracker)
+            ratio, ratio_source = category_cfg.resolve_ratio(tracker)
 
             target_seed_time = (
                 torrent.seeding_time_limit if seed_time_minutes is None else seed_time_minutes
@@ -354,7 +351,7 @@ def maintain_free_space(
 ) -> None:
     log.info("maintaining free space...")
 
-    cfg = config.qbittorrent.maintain_free_space
+    cfg = config.maintain_free_space
     torrents = torrents_in_categories(client, cfg.categories, cfg.ignore_categories)
     free_space = client.sync_maindata().server_state.free_space_on_disk
     threshold = cfg.free_space_threshold_bytes
@@ -448,35 +445,33 @@ def run(
     if stopped_first_seen is None:
         stopped_first_seen = {}
 
-    qbittorrent = config.qbittorrent
-
-    if qbittorrent.remove_unregistered.enabled:
+    if config.remove_unregistered.enabled:
         with bound_contextvars(job="remove_unregistered"):
             remove_unregistered(
                 client,
-                qbittorrent.remove_unregistered,
+                config.remove_unregistered,
                 unregistered_first_seen,
                 dry_run,
                 arrs=config.arrs,
             )
 
-    if qbittorrent.set_seed_limits.enabled:
+    if config.set_seed_limits.enabled:
         with bound_contextvars(job="set_seed_limits"):
             set_seed_limits(client, config, dry_run)
 
-    if qbittorrent.remove_stopped.enabled:
+    if config.remove_stopped.enabled:
         with bound_contextvars(job="remove_stopped"):
             remove_stopped(
-                client, qbittorrent.remove_stopped, stopped_first_seen, dry_run, arrs=config.arrs
+                client, config.remove_stopped, stopped_first_seen, dry_run, arrs=config.arrs
             )
 
-    if qbittorrent.maintain_free_space.enabled:
+    if config.maintain_free_space.enabled:
         with bound_contextvars(job="maintain_free_space"):
             maintain_free_space(client, config, dry_run)
 
-    if qbittorrent.cleanup_empty_dirs.enabled:
+    if config.cleanup_empty_dirs.enabled:
         with bound_contextvars(job="cleanup_empty_dirs"):
-            cleanup_empty_dirs(client, qbittorrent.cleanup_empty_dirs, dry_run)
+            cleanup_empty_dirs(client, config.cleanup_empty_dirs, dry_run)
 
 
 def main():
@@ -526,7 +521,7 @@ def main():
         )
         return
 
-    with bound_contextvars(interval_seconds=config.qbittorrent.interval_seconds):
+    with bound_contextvars(interval_seconds=config.interval_seconds):
         log.info("running in daemon mode")
 
     while True:
@@ -541,7 +536,7 @@ def main():
         except Exception:
             log.exception("run failed")
 
-        time.sleep(config.qbittorrent.interval_seconds)
+        time.sleep(config.interval_seconds)
 
 
 if __name__ == "__main__":

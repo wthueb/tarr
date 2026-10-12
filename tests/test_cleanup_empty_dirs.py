@@ -235,8 +235,8 @@ def run_config(**job):
                 "host": "localhost",
                 "username": "user",
                 "password": "pass",
-                "cleanup_empty_dirs": job,
             },
+            "cleanup_empty_dirs": job,
             "trackers": [
                 {"name": "example", "hosts": ["example.org"], "seed_time_minutes": 1, "ratio": 1}
             ],

@@ -207,7 +207,7 @@ class SetSeedLimitsCategoryConfig(BaseModel):
     # preserves the torrent's current value; an omitted field continues resolution.
     seed_time_minutes: SeedTimeMinutes | None = None
     ratio: Ratio | None = None
-    # Category defaults are used after tracker limits and before the global defaults.
+    # Category defaults are used after tracker limits.
     default_seed_time_minutes: SeedTimeMinutes | None = None
     default_ratio: Ratio | None = None
     action: ShareLimitAction
@@ -230,7 +230,6 @@ class SetSeedLimitsCategoryConfig(BaseModel):
     def resolve_seed_time_minutes(
         self,
         tracker: TrackerConfig | None,
-        global_default: SeedTimeMinutes | None,
     ) -> tuple[SeedTimeMinutes | None, str]:
         if tracker is not None and tracker.name in self.force_use_tracker_limits:
             return tracker.seed_time_minutes, f"forced_tracker:{tracker.name}"
@@ -240,12 +239,11 @@ class SetSeedLimitsCategoryConfig(BaseModel):
             return tracker.seed_time_minutes, f"tracker:{tracker.name}"
         if "default_seed_time_minutes" in self.model_fields_set:
             return self.default_seed_time_minutes, "category_default"
-        return global_default, "global_default"
+        return None, "current"
 
     def resolve_ratio(
         self,
         tracker: TrackerConfig | None,
-        global_default: Ratio | None,
     ) -> tuple[Ratio | None, str]:
         if tracker is not None and tracker.name in self.force_use_tracker_limits:
             return tracker.ratio, f"forced_tracker:{tracker.name}"
@@ -255,7 +253,7 @@ class SetSeedLimitsCategoryConfig(BaseModel):
             return tracker.ratio, f"tracker:{tracker.name}"
         if "default_ratio" in self.model_fields_set:
             return self.default_ratio, "category_default"
-        return global_default, "global_default"
+        return None, "current"
 
 
 class SetSeedLimitsConfig(BaseModel):
@@ -264,8 +262,6 @@ class SetSeedLimitsConfig(BaseModel):
     enabled: bool = False
     # Only torrents whose exact category appears here are managed.
     categories: list[SetSeedLimitsCategoryConfig] = Field(default_factory=list)
-    default_seed_time_minutes: SeedTimeMinutes | None = None
-    default_ratio: Ratio | None = None
 
     @model_validator(mode="after")
     def _require_unique_categories(self) -> SetSeedLimitsConfig:
@@ -353,18 +349,18 @@ class QBittorrentConfig(BaseModel):
     host: str
     username: str
     password: str
-    interval_seconds: int = Field(default=60, ge=1)
-    remove_unregistered: RemoveUnregisteredConfig = Field(default_factory=RemoveUnregisteredConfig)
-    remove_stopped: RemoveStoppedConfig = Field(default_factory=RemoveStoppedConfig)
-    maintain_free_space: MaintainFreeSpaceConfig = Field(default_factory=MaintainFreeSpaceConfig)
-    set_seed_limits: SetSeedLimitsConfig = Field(default_factory=SetSeedLimitsConfig)
-    cleanup_empty_dirs: CleanupEmptyDirsConfig = Field(default_factory=CleanupEmptyDirsConfig)
 
 
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     qbittorrent: QBittorrentConfig
+    interval_seconds: int = Field(default=60, ge=1)
+    remove_unregistered: RemoveUnregisteredConfig = Field(default_factory=RemoveUnregisteredConfig)
+    remove_stopped: RemoveStoppedConfig = Field(default_factory=RemoveStoppedConfig)
+    maintain_free_space: MaintainFreeSpaceConfig = Field(default_factory=MaintainFreeSpaceConfig)
+    set_seed_limits: SetSeedLimitsConfig = Field(default_factory=SetSeedLimitsConfig)
+    cleanup_empty_dirs: CleanupEmptyDirsConfig = Field(default_factory=CleanupEmptyDirsConfig)
     trackers: list[TrackerConfig] = Field(min_length=1)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     arrs: dict[str, ArrConfig] = Field(default_factory=dict)
@@ -372,7 +368,7 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _require_known_arrs(self) -> Config:
         for job in ("remove_unregistered", "remove_stopped", "maintain_free_space"):
-            cfg = getattr(self.qbittorrent, job)
+            cfg = getattr(self, job)
             for category in cfg.categories or []:
                 if not isinstance(category, RemovalCategoryConfig):
                     continue
@@ -384,7 +380,7 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _require_known_forced_trackers(self) -> Config:
         tracker_names = {tracker.name for tracker in self.trackers}
-        for category in self.qbittorrent.set_seed_limits.categories:
+        for category in self.set_seed_limits.categories:
             for name in category.force_use_tracker_limits:
                 if name not in tracker_names:
                     raise ValueError(

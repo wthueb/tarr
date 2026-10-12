@@ -74,10 +74,10 @@ def test_startup_warning_names_overlapping_categories():
                 "host": "localhost",
                 "username": "user",
                 "password": "pass",
-                "remove_unregistered": {
-                    "categories": ["music", None],
-                    "ignore_categories": ["music", None],
-                },
+            },
+            "remove_unregistered": {
+                "categories": ["music", None],
+                "ignore_categories": ["music", None],
             },
             "trackers": [
                 {

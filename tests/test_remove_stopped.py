@@ -33,8 +33,8 @@ def make_run_config(*, seed_time_minutes=1, ratio=1, **remove_stopped):
                 "host": "localhost",
                 "username": "user",
                 "password": "pass",
-                "remove_stopped": remove_stopped,
             },
+            "remove_stopped": remove_stopped,
             "trackers": [
                 {
                     "name": "example",
@@ -334,10 +334,8 @@ def test_run_applies_seed_limits_before_checking_stopped_removal(
     torrent.delete.side_effect = lambda **_kwargs: operations.append("remove_stopped")
     client = FakeClient([torrent])
     config = make_run_config(enabled=True, seed_time_minutes=applied_limit, ratio=applied_limit)
-    config.qbittorrent.set_seed_limits.enabled = True
-    config.qbittorrent.set_seed_limits.categories = [
-        SetSeedLimitsCategoryConfig(name="movies", action="Stop")
-    ]
+    config.set_seed_limits.enabled = True
+    config.set_seed_limits.categories = [SetSeedLimitsCategoryConfig(name="movies", action="Stop")]
 
     run(cast(qbittorrentapi.Client, client), config, {})
 

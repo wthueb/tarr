@@ -49,7 +49,7 @@ uv run tarr --config config.yaml --daemon
 
 The config path defaults to `config.yaml`. It can also be supplied with `-c` /
 `--config` or through the `CONFIG_FILE` environment variable. In daemon mode,
-`qbittorrent.interval_seconds` controls the polling interval and a failed pass is
+`interval_seconds` controls the polling interval and a failed pass is
 logged before the next one is attempted.
 
 ## Configuration model
@@ -58,9 +58,15 @@ See [`config.example.yaml`](config.example.yaml) for the complete, documented
 schema. Its top-level sections are:
 
 - `logging`: log level, output format, and optional rotating file output.
-- `qbittorrent`: WebUI connection, polling interval, and the five job settings.
+- `interval_seconds`: polling interval in daemon mode (defaults to 60 seconds).
+- `qbittorrent`: WebUI connection settings only (`host`, `username`, `password`).
+- `remove_unregistered`, `remove_stopped`, `set_seed_limits`, `maintain_free_space`,
+  and `cleanup_empty_dirs`: independent job settings.
 - `trackers`: tracker hostnames, minimum seed-time and ratio rules, and deletion priorities.
 - `arrs`: optional named Radarr/Sonarr connections for removal verification.
+
+Polling and job settings must be at the root; nesting them under `qbittorrent`
+is rejected. The previous nested layout is not supported.
 
 ### Categories
 
@@ -71,15 +77,14 @@ for torrents that have no category. Category entries can also be objects with
 `name` and `arr_verify_removal`:
 
 ```yaml
-qbittorrent:
-  remove_stopped:
-    enabled: true
-    categories:
-      - name: radarr
-        arr_verify_removal: [radarr, radarr4k]
-      - name: sonarr
-        arr_verify_removal: [sonarr]
-    on_delete: RemoveWithContent
+remove_stopped:
+  enabled: true
+  categories:
+    - name: radarr
+      arr_verify_removal: [radarr, radarr4k]
+    - name: sonarr
+      arr_verify_removal: [sonarr]
+  on_delete: RemoveWithContent
 arrs:
   radarr:
     host: http://radarr:7878
@@ -148,7 +153,10 @@ this order:
 1. An explicit category value.
 2. The matching tracker value when `use_tracker_limits` is enabled.
 3. The category's `default_*` value.
-4. The job's global `default_*` value.
+4. Preserve the torrent's current value.
+
+Job-level `set_seed_limits.default_seed_time_minutes` and `set_seed_limits.default_ratio`
+are not supported and are rejected; defaults can only be set per category.
 
 A category can set `force_use_tracker_limits: [nyaa]` to override that order when
 the torrent's matching tracker has a listed name. Both seed time and ratio then
@@ -177,14 +185,12 @@ qui creates for cross-seeds. Enable this independent job to clean them up,
 including leftovers from deletions outside `tarr`:
 
 ```yaml
-qbittorrent:
-  # alongside the connection and other job settings
-  cleanup_empty_dirs:
-    enabled: true
-    directories:
-      - /downloads/cross-seed
-    name_pattern: "*--????????"
-    min_age_minutes: 60
+cleanup_empty_dirs:
+  enabled: true
+  directories:
+    - /downloads/cross-seed
+  name_pattern: "*--????????"
+  min_age_minutes: 60
 ```
 
 The job runs each polling pass, after the other jobs. It only considers immediate
@@ -253,11 +259,10 @@ services:
 For these mounts, configure `tarr` with:
 
 ```yaml
-qbittorrent:
-  cleanup_empty_dirs:
-    enabled: true
-    directories:
-      - "/downloads/cross-seed:/data/torrents/cross-seed"
+cleanup_empty_dirs:
+  enabled: true
+  directories:
+    - "/downloads/cross-seed:/data/torrents/cross-seed"
 ```
 
 The included compose file does not mount downloads by default; enabling cleanup

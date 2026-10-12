@@ -5,114 +5,14 @@ logging:
   # file: /var/log/tarr/tarr.log
   # file_count: 20
 
-# connection to the qBittorrent WebUI
+# how often to check when running with --daemon
+interval_seconds: 60
+
+# connection to the qBittorrent WebUI (connection settings only)
 qbittorrent:
   host: http://localhost:8080
   username: admin
   password: adminadmin
-
-  # how often to check when running with --daemon
-  interval_seconds: 60
-
-  # delete torrents whose tracker reports them as "unregistered".
-  # waits `delay_minutes` after first seeing the status before deleting, since some
-  # trackers report it transiently.
-  remove_unregistered:
-    enabled: true
-    delay_minutes: 15
-    # optionally, only consider torrents in these categories; omit or set to null
-    # to consider every category. a list entry of null represents no category.
-    categories: null
-    # never remove torrents in these categories; a `null` entry means torrents
-    # without a category (useful for torrents you are uploading)
-    ignore_categories:
-      - null
-      - upload
-
-  # remove torrents after they have continuously appeared as completed and stopped for
-  # `delay_minutes`. actively seeding torrents are left alone; tracking starts when
-  # tarr first observes a completed torrent in a stopped state. removal also requires
-  # reaching the torrent's active qBittorrent seed-time OR ratio limit; -1 is unlimited.
-  # inherited defaults, manually defined limits, and limits applied by set_seed_limits
-  # are respected. set_seed_limits runs first; no matching tracker is required.
-  remove_stopped:
-    enabled: false
-    delay_minutes: 15
-    # optionally, only consider torrents in these categories; omit or set to null
-    # to consider every category. a list entry of null represents no category.
-    categories: null
-    # always exclude these categories, even if they also appear in categories
-    ignore_categories: []
-    # Remove keeps downloaded files; RemoveWithContent deletes them
-    on_delete: Remove
-
-  # once free space drops below `free_space_threshold_gibi`, remove eligible torrents
-  # (highest tracker delete_priority first, then most swarm seeders) until the threshold
-  # is met. a torrent is eligible once it has seeded longer than its tracker's
-  # `seed_time_minutes` OR reached its `ratio`.
-  maintain_free_space:
-    enabled: true
-    # only torrents in one of these categories are considered (set to null for all)
-    categories:
-      - name: autobrr
-      # Use objects to verify every listed Arr queue before removal. Strings and null
-      # are also accepted for categories without verification.
-      # - name: radarr
-      #   arr_verify_removal: [radarr, radarr4k]
-    # always exclude these categories, even if they also appear in categories
-    ignore_categories: []
-    free_space_threshold_gibi: 1024
-
-  # prune old empty directories left after deletions performed by qBittorrent or other tools.
-  # requires locally mounted storage and write permissions; paths may differ via mappings.
-  # only immediate children are scanned; symlinks, nonempty directories, and paths referenced
-  # by any current torrent (regardless of category/state) are never removed.
-  cleanup_empty_dirs:
-    enabled: false
-    directories:
-      # one path means identical paths in qBittorrent and tarr
-      - /downloads/cross-seed
-      # for different Docker mounts, replace the entry above with qBittorrent-path:tarr-path:
-      # - "/downloads/cross-seed:/data/torrents/cross-seed"
-    # glob matched against directory names; qui uses name--<8-character hash prefix>
-    name_pattern: "*--????????"
-    min_age_minutes: 60
-
-  # reconcile qBittorrent share limits for the categories listed below. configured limits
-  # replace different torrent values; null means preserve the current value and -1 means
-  # unlimited.
-  set_seed_limits:
-    enabled: true
-    default_seed_time_minutes: null
-    default_ratio: null
-    # Each category requires action: Default, Stop, Remove, RemoveWithContent,
-    # or EnableSuperSeeding. There is no global action or inheritance.
-    categories:
-      # use matching tracker limits, then the global defaults above
-      - name: cross
-        action: RemoveWithContent
-
-      # category limits take precedence over matching trackers
-      - name: upload
-        action: Stop
-        seed_time_minutes: -1
-        ratio: -1
-
-      # Named matching trackers override both explicit limits, including null/-1,
-      # even with use_tracker_limits: false. Names reference trackers[].name.
-      # Otherwise normal precedence applies. The category action is unchanged.
-      - name: radarr
-        seed_time_minutes: -1
-        ratio: -1
-        force_use_tracker_limits: [Example]
-        action: Stop
-
-      # precedence is explicit category limit, tracker, category default, global default
-      - name: dontcare
-        seed_time_minutes: 0
-        use_tracker_limits: true # defaults to true
-        default_ratio: 0.5
-        action: Stop
 
 # Optional named Radarr/Sonarr instances referenced by arr_verify_removal in any
 # removal job's categories. Hosts may include a reverse-proxy base path.
@@ -124,6 +24,104 @@ arrs: {}
 #   radarr4k:
 #     host: http://radarr4k:7878
 #     api_key: replace-me
+
+# delete torrents whose tracker reports them as "unregistered".
+# waits `delay_minutes` after first seeing the status before deleting, since some
+# trackers report it transiently.
+remove_unregistered:
+  enabled: true
+  delay_minutes: 15
+  # optionally, only consider torrents in these categories; omit or set to null
+  # to consider every category. a list entry of null represents no category.
+  categories: null
+  # never remove torrents in these categories; a `null` entry means torrents
+  # without a category (useful for torrents you are uploading)
+  ignore_categories:
+    - null
+    - upload
+
+# remove torrents after they have continuously appeared as completed and stopped for
+# `delay_minutes`. actively seeding torrents are left alone; tracking starts when
+# tarr first observes a completed torrent in a stopped state. removal also requires
+# reaching the torrent's active qBittorrent seed-time OR ratio limit; -1 is unlimited.
+# inherited defaults, manually defined limits, and limits applied by set_seed_limits
+# are respected. set_seed_limits runs first; no matching tracker is required.
+remove_stopped:
+  enabled: false
+  delay_minutes: 15
+  # optionally, only consider torrents in these categories; omit or set to null
+  # to consider every category. a list entry of null represents no category.
+  categories: null
+  # always exclude these categories, even if they also appear in categories
+  ignore_categories: []
+  # Remove keeps downloaded files; RemoveWithContent deletes them
+  on_delete: Remove
+
+# reconcile qBittorrent share limits for the categories listed below. configured limits
+# replace different torrent values; null means preserve the current value and -1 means
+# unlimited.
+set_seed_limits:
+  enabled: true
+  # Each category requires action: Default, Stop, Remove, RemoveWithContent,
+  # or EnableSuperSeeding. There is no global action or inheritance.
+  categories:
+    # use matching tracker limits; preserve current limits if no tracker matches
+    - name: cross
+      action: RemoveWithContent
+
+    # category limits take precedence over matching trackers
+    - name: upload
+      action: Stop
+      seed_time_minutes: -1
+      ratio: -1
+
+    # Named matching trackers override both explicit limits, including null/-1,
+    # even with use_tracker_limits: false. Names reference trackers[].name.
+    # Otherwise normal precedence applies. The category action is unchanged.
+    - name: radarr
+      seed_time_minutes: -1
+      ratio: -1
+      force_use_tracker_limits: [Example]
+      action: Stop
+
+    # precedence is explicit category limit, tracker, category default, current value
+    - name: dontcare
+      seed_time_minutes: 0
+      use_tracker_limits: true # defaults to true
+      default_ratio: 0.5
+      action: Stop
+
+# once free space drops below `free_space_threshold_gibi`, remove eligible torrents
+# (highest tracker delete_priority first, then most swarm seeders) until the threshold
+# is met. a torrent is eligible once it has seeded longer than its tracker's
+# `seed_time_minutes` OR reached its `ratio`.
+maintain_free_space:
+  enabled: true
+  # only torrents in one of these categories are considered (set to null for all)
+  categories:
+    - name: autobrr
+    # Use objects to verify every listed Arr queue before removal. Strings and null
+    # are also accepted for categories without verification.
+    # - name: radarr
+    #   arr_verify_removal: [radarr, radarr4k]
+  # always exclude these categories, even if they also appear in categories
+  ignore_categories: []
+  free_space_threshold_gibi: 1024
+
+# prune old empty directories left after deletions performed by qBittorrent or other tools.
+# requires locally mounted storage and write permissions; paths may differ via mappings.
+# only immediate children are scanned; symlinks, nonempty directories, and paths referenced
+# by any current torrent (regardless of category/state) are never removed.
+cleanup_empty_dirs:
+  enabled: false
+  directories:
+    # one path means identical paths in qBittorrent and tarr
+    - /downloads/cross-seed
+    # for different Docker mounts, replace the entry above with qBittorrent-path:tarr-path:
+    # - "/downloads/cross-seed:/data/torrents/cross-seed"
+  # glob matched against directory names; qui uses name--<8-character hash prefix>
+  name_pattern: "*--????????"
+  min_age_minutes: 60
 
 # seed time and ratio limits are defined per tracker. a torrent is matched to a tracker
 # by its announce hostname. used both for removal eligibility (maintain_free_space) and

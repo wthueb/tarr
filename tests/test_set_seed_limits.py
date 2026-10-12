@@ -29,8 +29,8 @@ def make_config(set_seed_limits, *, trackers=None):
                 "host": "localhost",
                 "username": "user",
                 "password": "pass",
-                "set_seed_limits": set_seed_limits,
             },
+            "set_seed_limits": set_seed_limits,
             "trackers": trackers
             if trackers is not None
             else [
@@ -114,6 +114,18 @@ def test_invalid_set_seed_limits_configuration_is_rejected(set_seed_limits):
         SetSeedLimitsConfig.model_validate(set_seed_limits)
 
 
+@pytest.mark.parametrize("field", ["default_seed_time_minutes", "default_ratio"])
+@pytest.mark.parametrize("value", [None, -1, 120])
+def test_job_level_defaults_are_rejected(field, value):
+    with pytest.raises(ValidationError) as error:
+        make_config({field: value, "categories": [{"name": "cross"}]})
+
+    assert any(
+        item["loc"] == ("set_seed_limits", field) and item["type"] == "extra_forbidden"
+        for item in error.value.errors()
+    )
+
+
 def test_trackers_cannot_configure_share_limit_actions():
     with pytest.raises(ValidationError):
         Config.model_validate(
@@ -172,12 +184,10 @@ def test_complete_category_limits_do_not_access_torrent_trackers():
     torrent.set_share_limits.assert_called_once()
 
 
-def test_tracker_limits_precede_category_and_global_defaults():
+def test_tracker_limits_precede_category_defaults():
     torrent = make_torrent()
     config = make_config(
         {
-            "default_seed_time_minutes": 300,
-            "default_ratio": 4.0,
             "categories": [
                 {
                     "name": "cross",
@@ -199,12 +209,10 @@ def test_tracker_limits_precede_category_and_global_defaults():
     )
 
 
-def test_category_defaults_precede_global_defaults_without_matching_tracker():
+def test_category_defaults_apply_without_matching_tracker():
     torrent = make_torrent(tracker_url="https://unknown.example/announce")
     config = make_config(
         {
-            "default_seed_time_minutes": 300,
-            "default_ratio": 4.0,
             "categories": [
                 {
                     "name": "cross",
@@ -226,17 +234,14 @@ def test_category_defaults_precede_global_defaults_without_matching_tracker():
     )
 
 
-def test_global_defaults_apply_independently():
+@pytest.mark.parametrize("seed_time_default", [{}, {"default_seed_time_minutes": None}])
+def test_category_defaults_apply_independently(seed_time_default):
     torrent = make_torrent(
         tracker_url="https://unknown.example/announce",
         seeding_time_limit=45,
     )
     config = make_config(
-        {
-            "default_seed_time_minutes": None,
-            "default_ratio": 0.5,
-            "categories": [{"name": "cross"}],
-        }
+        {"categories": [{"name": "cross", "default_ratio": 0.5, **seed_time_default}]}
     )
 
     set_seed_limits(FakeClient([torrent]), config)
@@ -254,8 +259,9 @@ def test_explicit_null_stops_resolution_and_preserves_current_value():
     torrent = make_torrent(ratio_limit=1.25)
     config = make_config(
         {
-            "default_ratio": 4.0,
-            "categories": [{"name": "cross", "ratio": None, "action": "Stop"}],
+            "categories": [
+                {"name": "cross", "ratio": None, "default_ratio": 4.0, "action": "Stop"}
+            ],
         }
     )
 
@@ -270,21 +276,43 @@ def test_explicit_null_stops_resolution_and_preserves_current_value():
     )
 
 
-def test_explicit_null_category_default_stops_before_global_default():
+def test_explicit_null_category_default_preserves_current_value():
     torrent = make_torrent(
         tracker_url="https://unknown.example/announce",
         ratio_limit=1.25,
     )
-    config = make_config(
-        {
-            "default_ratio": 4.0,
-            "categories": [{"name": "cross", "default_ratio": None}],
-        }
-    )
+    config = make_config({"categories": [{"name": "cross", "default_ratio": None}]})
 
     set_seed_limits(FakeClient([torrent]), config)
 
     assert torrent.set_share_limits.call_args.kwargs["ratio_limit"] == "1.25"
+
+
+@pytest.mark.parametrize("use_tracker_limits", [False, True])
+def test_missing_limits_preserve_current_values(use_tracker_limits):
+    torrent = make_torrent(
+        tracker_url="https://unknown.example/announce"
+        if use_tracker_limits
+        else "https://tracker.example.com/announce",
+        ratio_limit=1.25,
+        seeding_time_limit=45,
+    )
+    config = make_config(
+        {"categories": [{"name": "cross", "use_tracker_limits": use_tracker_limits}]}
+    )
+
+    set_seed_limits(FakeClient([torrent]), config)
+
+    torrent.set_share_limits.assert_called_once_with(
+        ratio_limit="1.25",
+        seeding_time_limit=45,
+        inactive_seeding_time_limit=-1,
+        share_limit_action="Default",
+        share_limits_mode="MatchAny",
+    )
+    category = config.set_seed_limits.categories[0]
+    assert category.resolve_seed_time_minutes(None) == (None, "current")
+    assert category.resolve_ratio(None) == (None, "current")
 
 
 def test_disabling_tracker_limits_uses_category_defaults():
@@ -451,13 +479,13 @@ def test_forced_tracker_overrides_explicit_limits_and_tracker_toggle(limit, use_
         share_limit_action="Stop",
         share_limits_mode="MatchAny",
     )
-    category = config.qbittorrent.set_seed_limits.categories[0]
+    category = config.set_seed_limits.categories[0]
     assert category.needs_tracker_limits
-    assert category.resolve_seed_time_minutes(config.trackers[0], None) == (
+    assert category.resolve_seed_time_minutes(config.trackers[0]) == (
         100,
         "forced_tracker:example",
     )
-    assert category.resolve_ratio(config.trackers[0], None) == (2.0, "forced_tracker:example")
+    assert category.resolve_ratio(config.trackers[0]) == (2.0, "forced_tracker:example")
 
 
 @pytest.mark.parametrize(
@@ -507,8 +535,6 @@ def test_unmatched_forced_tracker_keeps_normal_fallbacks(use_tracker_limits):
     torrent = make_torrent(tracker_url="https://unknown.example/announce")
     config = make_config(
         {
-            "default_seed_time_minutes": 500,
-            "default_ratio": 5,
             "categories": [
                 {
                     "name": "cross",
@@ -523,7 +549,7 @@ def test_unmatched_forced_tracker_keeps_normal_fallbacks(use_tracker_limits):
     set_seed_limits(FakeClient([torrent]), config)
 
     assert torrent.set_share_limits.call_args.kwargs["seeding_time_limit"] == 200
-    assert torrent.set_share_limits.call_args.kwargs["ratio_limit"] == "5.0"
+    assert torrent.set_share_limits.call_args.kwargs["ratio_limit"] == "-2"
 
 
 def test_empty_force_list_does_not_read_trackers_with_complete_category_limits():
@@ -544,7 +570,7 @@ def test_empty_force_list_does_not_read_trackers_with_complete_category_limits()
 
     set_seed_limits(FakeClient([torrent]), config)
 
-    assert not config.qbittorrent.set_seed_limits.categories[0].needs_tracker_limits
+    assert not config.set_seed_limits.categories[0].needs_tracker_limits
     torrent.set_share_limits.assert_called_once()
 
 
