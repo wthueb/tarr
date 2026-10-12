@@ -1,5 +1,24 @@
 # Changelog
 
+## [6.0.0](https://github.com/wthueb/tarr/compare/v5.2.0...v6.0.0) (2026-10-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* move polling and job settings to the root
+* require explicit actions for seed limit categories
+
+### Features
+
+* require explicit actions for seed limit categories ([dfcfb0e](https://github.com/wthueb/tarr/commit/dfcfb0e5f6bc1370a180ad2bf7fb5cf4a764a182))
+* support forced tracker limits per category ([9009c0a](https://github.com/wthueb/tarr/commit/9009c0a41c82f9a50fbacb92a154bb62e1e09d0b))
+* verify arr queues before removing torrents ([9723f69](https://github.com/wthueb/tarr/commit/9723f69abc271ba09a81c969ffa901c03fe844ea))
+
+
+### Code Refactoring
+
+* move polling and job settings to the root ([053282b](https://github.com/wthueb/tarr/commit/053282b3c8c063084b0fb722271086799b6e7eda))
+
 ## [5.2.0](https://github.com/wthueb/tarr/compare/v5.1.1...v5.2.0) (2026-10-11)
 
 
