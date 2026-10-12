@@ -81,14 +81,16 @@ qbittorrent:
     enabled: true
     default_seed_time_minutes: null
     default_ratio: null
-    # Default, Stop, Remove, RemoveWithContent, or EnableSuperSeeding
-    action: RemoveWithContent
+    # Each category requires action: Default, Stop, Remove, RemoveWithContent,
+    # or EnableSuperSeeding. There is no global action or inheritance.
     categories:
       # use matching tracker limits, then the global defaults above
       - name: cross
+        action: RemoveWithContent
 
       # category limits take precedence over matching trackers
       - name: upload
+        action: Stop
         seed_time_minutes: -1
         ratio: -1
 
@@ -97,7 +99,7 @@ qbittorrent:
         seed_time_minutes: 0
         use_tracker_limits: true # defaults to true
         default_ratio: 0.5
-        action: Stop # optional per-category override
+        action: Stop
 
 # seed time and ratio limits are defined per tracker. a torrent is matched to a tracker
 # by its announce hostname. used both for removal eligibility (maintain_free_space) and

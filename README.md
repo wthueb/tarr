@@ -112,9 +112,10 @@ this order:
 
 An omitted value continues down that chain. An explicit `null` preserves the
 torrent's current value, while `-1` sets an unlimited value. Zero and positive
-numbers are applied as limits. The limit action can be `Default`, `Stop`,
-`Remove`, `RemoveWithContent`, or `EnableSuperSeeding`, with an optional override
-per category.
+numbers are applied as limits. Each category must explicitly specify `action`:
+`Default`, `Stop`, `Remove`, `RemoveWithContent`, or `EnableSuperSeeding`. There is
+no global action or inheritance; a missing/null category action or a job-level
+`action` is rejected.
 
 The job also sets the inactive-seeding limit to unlimited and uses `MatchAny`
 semantics. qBittorrent versions before 5.3 already use those semantics implicitly.

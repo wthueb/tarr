@@ -279,7 +279,7 @@ def set_seed_limits(
                 torrent.seeding_time_limit if seed_time_minutes is None else seed_time_minutes
             )
             target_ratio = torrent.ratio_limit if ratio is None else ratio
-            target_action = category_cfg.action or cfg.action
+            target_action = category_cfg.action
             target_inactive_seed_time = UNLIMITED
             target_mode = "MatchAny"
             supports_share_limits_mode = hasattr(torrent, "share_limits_mode")

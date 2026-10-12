@@ -17,6 +17,12 @@ class FakeClient:
 
 
 def make_config(set_seed_limits):
+    set_seed_limits = {
+        **set_seed_limits,
+        "categories": [
+            {"action": "Default", **category} for category in set_seed_limits.get("categories", [])
+        ],
+    }
     return Config.model_validate(
         {
             "qbittorrent": {
@@ -67,12 +73,10 @@ def make_torrent(
     "action",
     ["Default", "Stop", "Remove", "RemoveWithContent", "EnableSuperSeeding"],
 )
-def test_all_share_limit_actions_are_valid_globally_and_per_category(action):
+def test_all_share_limit_actions_are_valid_per_category(action):
     config = SetSeedLimitsConfig.model_validate(
-        {"action": action, "categories": [{"name": "cross", "action": action}]}
+        {"categories": [{"name": "cross", "action": action}]}
     )
-
-    assert config.action == action
     assert config.categories[0].action == action
 
 
@@ -83,10 +87,12 @@ def test_all_share_limit_actions_are_valid_globally_and_per_category(action):
         {"ignore_categories": []},
         {"on_delete": "Remove"},
         {"categories": [{"name": "cross", "action": None}]},
-        {"categories": [{"name": "cross", "ratio": -2}]},
-        {"categories": [{"name": "cross", "seed_time_minutes": -2}]},
-        {"categories": [{"name": "cross"}, {"name": "cross"}]},
-        {"categories": [{"name": None}, {"name": ""}]},
+        {"categories": [{"name": "cross", "action": "Stop", "ratio": -2}]},
+        {"categories": [{"name": "cross", "action": "Stop", "seed_time_minutes": -2}]},
+        {"categories": [{"name": "cross", "action": "Stop"}] * 2},
+        {"categories": [{"name": None, "action": "Stop"}, {"name": "", "action": "Stop"}]},
+        {"categories": [{"name": "cross"}]},
+        {"action": "Stop", "categories": [{"name": "cross", "action": "Stop"}]},
     ],
     ids=[
         "legacy-category-list",
@@ -97,6 +103,8 @@ def test_all_share_limit_actions_are_valid_globally_and_per_category(action):
         "global-time-sentinel",
         "duplicate-category",
         "duplicate-uncategorized-category",
+        "missing-category-action",
+        "global-action",
     ],
 )
 def test_invalid_set_seed_limits_configuration_is_rejected(set_seed_limits):
@@ -130,8 +138,14 @@ def test_category_limits_override_matching_tracker_limits():
     torrent = make_torrent()
     config = make_config(
         {
-            "action": "RemoveWithContent",
-            "categories": [{"name": "cross", "seed_time_minutes": -1, "ratio": -1}],
+            "categories": [
+                {
+                    "name": "cross",
+                    "seed_time_minutes": -1,
+                    "ratio": -1,
+                    "action": "RemoveWithContent",
+                }
+            ],
         }
     )
 
@@ -239,8 +253,7 @@ def test_explicit_null_stops_resolution_and_preserves_current_value():
     config = make_config(
         {
             "default_ratio": 4.0,
-            "action": "Stop",
-            "categories": [{"name": "cross", "ratio": None}],
+            "categories": [{"name": "cross", "ratio": None, "action": "Stop"}],
         }
     )
 
@@ -293,11 +306,10 @@ def test_disabling_tracker_limits_uses_category_defaults():
     assert torrent.set_share_limits.call_args.kwargs["seeding_time_limit"] == 200
 
 
-def test_category_action_overrides_global_action():
+def test_category_action_is_applied():
     torrent = make_torrent()
     config = make_config(
         {
-            "action": "RemoveWithContent",
             "categories": [{"name": "cross", "action": "EnableSuperSeeding"}],
         }
     )

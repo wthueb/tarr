@@ -144,18 +144,12 @@ class SetSeedLimitsCategoryConfig(BaseModel):
     # Category defaults are used after tracker limits and before the global defaults.
     default_seed_time_minutes: SeedTimeMinutes | None = None
     default_ratio: Ratio | None = None
-    action: ShareLimitAction | None = None
+    action: ShareLimitAction
 
     @field_validator("name")
     @classmethod
     def _normalize_uncategorized_name(cls, value: str | None) -> str | None:
         return None if value == "" else value
-
-    @model_validator(mode="after")
-    def _reject_null_action(self) -> SetSeedLimitsCategoryConfig:
-        if "action" in self.model_fields_set and self.action is None:
-            raise ValueError("action cannot be null")
-        return self
 
     @property
     def needs_tracker_limits(self) -> bool:
@@ -198,8 +192,6 @@ class SetSeedLimitsConfig(BaseModel):
     categories: list[SetSeedLimitsCategoryConfig] = Field(default_factory=list)
     default_seed_time_minutes: SeedTimeMinutes | None = None
     default_ratio: Ratio | None = None
-    # qBittorrent shareLimitAction applied when a share limit is reached
-    action: ShareLimitAction = "Default"
 
     @model_validator(mode="after")
     def _require_unique_categories(self) -> SetSeedLimitsConfig:
