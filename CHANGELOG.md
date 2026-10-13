@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.0.0](https://github.com/wthueb/tarr/compare/v6.0.0...v7.0.0) (2026-10-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* set seed limits per-tracker instead of per category
+
+### Features
+
+* configuration yaml schema ([192eb8f](https://github.com/wthueb/tarr/commit/192eb8fcbd3bb6e029ec2f27f68f8774a0ed210e))
+
+
+### Code Refactoring
+
+* set seed limits per-tracker instead of per category ([d0bf3b0](https://github.com/wthueb/tarr/commit/d0bf3b071e2b2ba487d61400882aedfa70074f40))
+
 ## [6.0.0](https://github.com/wthueb/tarr/compare/v5.2.0...v6.0.0) (2026-10-12)
 
 
