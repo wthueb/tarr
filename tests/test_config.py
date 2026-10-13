@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from tarr.config import Config, load_config
+from tarr.schema import config_yaml_example
 
 ROOT_FIELDS = [
     "interval_seconds",
@@ -35,12 +36,14 @@ def minimal_config() -> dict:
     }
 
 
-def test_example_config_uses_supported_structure():
-    config = load_config(pathlib.Path(__file__).parents[1] / "config.example.yaml")
+def test_generated_full_config_uses_supported_structure(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(config_yaml_example(full=True))
+    config = load_config(path)
 
     assert config.interval_seconds == 60
     assert config.remove_unregistered.enabled is True
-    assert config.remove_stopped.enabled is False
+    assert config.remove_stopped.enabled is True
     assert config.maintain_free_space.enabled is True
     assert config.set_seed_limits.enabled is True
     assert config.cleanup_empty_dirs.enabled is False

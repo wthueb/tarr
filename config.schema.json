@@ -1,0 +1,1092 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ArrConfig": {
+      "additionalProperties": false,
+      "description": "Connection to a named Radarr or Sonarr instance for guarded torrent removal.",
+      "properties": {
+        "host": {
+          "description": "HTTP(S) base URL, optionally including a reverse-proxy base path. Credentials, query strings, and fragments are forbidden. Trailing slashes are stripped.",
+          "examples": [
+            "http://radarr:7878",
+            "https://media.example.org/sonarr"
+          ],
+          "title": "Host",
+          "type": "string"
+        },
+        "api_key": {
+          "description": "Nonempty Radarr/Sonarr API key from Settings > General. Treat as a secret.",
+          "examples": [
+            "replace-me"
+          ],
+          "minLength": 1,
+          "title": "Api Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "api_key"
+      ],
+      "title": "ArrConfig",
+      "type": "object"
+    },
+    "CleanupEmptyDirsConfig": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "directories": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "directories"
+            ]
+          }
+        }
+      ],
+      "description": "Prune old empty directories left by qBittorrent or other tools; runs last.\n\nOnly immediate children of configured roots are scanned. Never removes roots,\nsymlinks, nonempty directories, or paths referenced by any current torrent,\nregardless of category/state. No cleanup if the torrent listing fails or paths\nare missing/relative. Uses rmdir only, never recursive deletion. Requires local\nstorage mounts and write permission; a remote qBittorrent host alone is insufficient.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable local empty-directory cleanup. Disabled by default.",
+          "examples": [
+            false,
+            true
+          ],
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "directories": {
+          "description": "Cleanup roots; at least one is required when enabled. A plain absolute path means the same path in qBittorrent and tarr. For different mounts use 'qBittorrent-path:tarr-local-path' (qBittorrent first); only the local side is scanned. Both sides must be absolute, non-root paths without '..'. Plain and mapped roots can be mixed; conflicting mappings for the same source fail startup. Most-specific source mappings protect torrent paths. Defaults to [].",
+          "examples": [
+            [
+              "/downloads/cross-seed"
+            ],
+            [
+              "/downloads/cross-seed:/data/torrents/cross-seed"
+            ]
+          ],
+          "items": {
+            "type": "string"
+          },
+          "title": "Directories",
+          "type": "array"
+        },
+        "name_pattern": {
+          "default": "*--????????",
+          "description": "Glob matched against directory basenames, not paths. The default matches qui's name--<8-character hash prefix> directories. Use '*' for every immediate child. Must be nonempty, contain no slash/backslash, and not be '.' or '..'. Quote patterns in YAML so '*' is not parsed as an alias.",
+          "examples": [
+            "*--????????",
+            "*"
+          ],
+          "title": "Name Pattern",
+          "type": "string"
+        },
+        "min_age_minutes": {
+          "default": 60,
+          "description": "Minimum directory age in minutes, measured from its modification time. Zero disables the age guard; emptiness and torrent-path protection still apply.",
+          "examples": [
+            60,
+            0
+          ],
+          "minimum": 0,
+          "title": "Min Age Minutes",
+          "type": "integer"
+        }
+      },
+      "title": "CleanupEmptyDirsConfig",
+      "type": "object"
+    },
+    "LoggingConfig": {
+      "additionalProperties": false,
+      "description": "Structured logs always go to stdout; optionally also write rotating files.",
+      "properties": {
+        "level": {
+          "default": "INFO",
+          "description": "Python log level, case-insensitive: DEBUG, INFO, WARNING, ERROR, CRITICAL, or NOTSET (WARN and FATAL aliases are also accepted).",
+          "examples": [
+            "INFO",
+            "DEBUG"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "format": {
+          "default": "logfmt",
+          "description": "Structured output format for both stdout and optional file logs.",
+          "enum": [
+            "logfmt",
+            "json"
+          ],
+          "examples": [
+            "logfmt",
+            "json"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional log file path; omit or use null for stdout only. Files rotate at 10 MiB. The process needs permission to create and write the file.",
+          "examples": [
+            "/var/log/tarr/tarr.log",
+            null
+          ],
+          "title": "File"
+        },
+        "file_count": {
+          "default": 20,
+          "description": "Number of rotated backup log files to retain when file logging is enabled.",
+          "examples": [
+            20
+          ],
+          "minimum": 1,
+          "title": "File Count",
+          "type": "integer"
+        }
+      },
+      "title": "LoggingConfig",
+      "type": "object"
+    },
+    "MaintainFreeSpaceConfig": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "free_space_threshold_gibi": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "free_space_threshold_gibi"
+            ]
+          }
+        }
+      ],
+      "description": "Delete eligible torrents with content until qBittorrent reports enough free space.\n\nEvery matched tracker must pass its required seed-time OR ratio policy; no match\nmeans no removal. Highest effective delete_priority goes first (the minimum\nacross matched trackers), then most swarm seeders. Desired limits and category\noverrides do not govern eligibility. Space is re-read after each removal so\nhard links are not assumed to reclaim space. Dry runs estimate from sizes.\nArr verification failures skip a candidate and continue to other torrents.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable this removal job. Disabled by default; review settings with --dry-run.",
+          "examples": [
+            false,
+            true
+          ],
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RemovalCategoryConfig"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Include only these exact categories; omit or use null to include all. An empty list includes none. Entries may be strings, YAML null for uncategorized torrents, or objects with name and arr_verify_removal. Verification is not inherited by other jobs. ignore_categories always wins.",
+          "examples": [
+            null,
+            [
+              "autobrr",
+              null
+            ],
+            [
+              {
+                "arr_verify_removal": [
+                  "radarr"
+                ],
+                "name": "radarr"
+              }
+            ]
+          ],
+          "title": "Categories"
+        },
+        "ignore_categories": {
+          "description": "Never consider torrents in these exact categories, even if also included in categories. YAML null represents uncategorized torrents. Defaults to [].",
+          "examples": [
+            [],
+            [
+              null,
+              "upload"
+            ]
+          ],
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Ignore Categories",
+          "type": "array"
+        },
+        "free_space_threshold_gibi": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Target free space in GiB (1 GiB = 1024^3 bytes), measured by qBittorrent. Required and non-null when enabled. Below this threshold, remove eligible torrents until the target is met or no eligible candidates remain.",
+          "examples": [
+            1024,
+            100
+          ],
+          "title": "Free Space Threshold Gibi"
+        }
+      },
+      "title": "MaintainFreeSpaceConfig",
+      "type": "object"
+    },
+    "QBittorrentConfig": {
+      "additionalProperties": false,
+      "description": "qBittorrent WebUI connection settings only; polling and jobs belong at the root.",
+      "properties": {
+        "host": {
+          "description": "qBittorrent WebUI base URL reachable from tarr. With the included Docker Compose setup, use http://qbittorrent:8080 rather than localhost.",
+          "examples": [
+            "http://localhost:8080",
+            "http://qbittorrent:8080"
+          ],
+          "title": "Host",
+          "type": "string"
+        },
+        "username": {
+          "description": "WebUI login username.",
+          "examples": [
+            "admin"
+          ],
+          "title": "Username",
+          "type": "string"
+        },
+        "password": {
+          "description": "WebUI login password. Replace the placeholder and treat as a secret.",
+          "examples": [
+            "replace-me"
+          ],
+          "title": "Password",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "username",
+        "password"
+      ],
+      "title": "QBittorrentConfig",
+      "type": "object"
+    },
+    "RemovalCategoryConfig": {
+      "additionalProperties": false,
+      "description": "A removal category with optional per-job Radarr/Sonarr queue verification.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact, case-sensitive qBittorrent category name. YAML null (or an empty string) means torrents without a category. ignore_categories always takes precedence.",
+          "examples": [
+            "radarr",
+            null
+          ],
+          "title": "Name"
+        },
+        "arr_verify_removal": {
+          "description": "Names from the top-level arrs mapping; defaults to []. Immediately before removal, every named instance's /api/v3/queue is checked, including all pages and unknown items. Any matching downloadId blocks removal regardless of status. Unreachable instances, authentication failures, or invalid responses also block removal. Unknown names fail startup. Checks apply only to this job/category and run during dry runs too. Use action: Stop in set_seed_limits so qBittorrent cannot automatically delete before verification.",
+          "examples": [
+            [],
+            [
+              "radarr"
+            ],
+            [
+              "radarr",
+              "radarr4k"
+            ]
+          ],
+          "items": {
+            "type": "string"
+          },
+          "title": "Arr Verify Removal",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "RemovalCategoryConfig",
+      "type": "object"
+    },
+    "RemoveStoppedConfig": {
+      "additionalProperties": false,
+      "description": "Remove completed torrents that remain stopped (pausedUP or stoppedUP).\n\nRequires reaching an active qBittorrent seed-time OR ratio limit AND passing\nevery matched tracker's required policy. No tracker match means no removal.\nInherited, manual, and set_seed_limits limits are respected. Both active limits\nunlimited prevent removal. Runs after set_seed_limits, fetching updated limits.\nActively seeding torrents are left alone; resuming resets the stopped timer.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable this removal job. Disabled by default; review settings with --dry-run.",
+          "examples": [
+            false,
+            true
+          ],
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RemovalCategoryConfig"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Include only these exact categories; omit or use null to include all. An empty list includes none. Entries may be strings, YAML null for uncategorized torrents, or objects with name and arr_verify_removal. Verification is not inherited by other jobs. ignore_categories always wins.",
+          "examples": [
+            null,
+            [
+              "autobrr",
+              null
+            ],
+            [
+              {
+                "arr_verify_removal": [
+                  "radarr"
+                ],
+                "name": "radarr"
+              }
+            ]
+          ],
+          "title": "Categories"
+        },
+        "ignore_categories": {
+          "description": "Never consider torrents in these exact categories, even if also included in categories. YAML null represents uncategorized torrents. Defaults to [].",
+          "examples": [
+            [],
+            [
+              null,
+              "upload"
+            ]
+          ],
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Ignore Categories",
+          "type": "array"
+        },
+        "delay_minutes": {
+          "default": 0,
+          "description": "Minutes continuously observed as completed and stopped before removal. Zero allows immediate removal once eligibility checks pass. Timers reset on restart or if the torrent resumes/is incomplete; positive delays need --daemon.",
+          "examples": [
+            15,
+            0
+          ],
+          "minimum": 0,
+          "title": "Delay Minutes",
+          "type": "integer"
+        },
+        "on_delete": {
+          "default": "Remove",
+          "description": "Remove keeps downloaded files; RemoveWithContent deletes them too.",
+          "enum": [
+            "Remove",
+            "RemoveWithContent"
+          ],
+          "examples": [
+            "Remove",
+            "RemoveWithContent"
+          ],
+          "title": "On Delete",
+          "type": "string"
+        }
+      },
+      "title": "RemoveStoppedConfig",
+      "type": "object"
+    },
+    "RemoveUnregisteredConfig": {
+      "additionalProperties": false,
+      "description": "Delete torrents and content after a tracker continuously reports unregistered.\n\nTracker retention requirements do not apply to this job. Category exclusions\nand any configured Arr verification still apply. Runs before all other jobs.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable this removal job. Disabled by default; review settings with --dry-run.",
+          "examples": [
+            false,
+            true
+          ],
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RemovalCategoryConfig"
+                  },
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Include only these exact categories; omit or use null to include all. An empty list includes none. Entries may be strings, YAML null for uncategorized torrents, or objects with name and arr_verify_removal. Verification is not inherited by other jobs. ignore_categories always wins.",
+          "examples": [
+            null,
+            [
+              "autobrr",
+              null
+            ],
+            [
+              {
+                "arr_verify_removal": [
+                  "radarr"
+                ],
+                "name": "radarr"
+              }
+            ]
+          ],
+          "title": "Categories"
+        },
+        "ignore_categories": {
+          "description": "Never consider torrents in these exact categories, even if also included in categories. YAML null represents uncategorized torrents. Defaults to [].",
+          "examples": [
+            [],
+            [
+              null,
+              "upload"
+            ]
+          ],
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Ignore Categories",
+          "type": "array"
+        },
+        "delay_minutes": {
+          "default": 0,
+          "description": "Wait this many minutes after first observing unregistered status, which some trackers report transiently. Zero removes immediately. Timers are in memory and reset on restart; positive delays are useful only with --daemon.",
+          "examples": [
+            15,
+            0
+          ],
+          "minimum": 0,
+          "title": "Delay Minutes",
+          "type": "integer"
+        }
+      },
+      "title": "RemoveUnregisteredConfig",
+      "type": "object"
+    },
+    "SeedLimits": {
+      "additionalProperties": false,
+      "description": "A complete seed policy; both seed_time_minutes and ratio are required.\n\nRemoval requires reaching the seed time OR ratio, not both. If both are -1,\nthis policy prevents removal. Limits are validated even for disabled jobs.",
+      "properties": {
+        "seed_time_minutes": {
+          "anyOf": [
+            {
+              "minimum": 0
+            },
+            {
+              "const": -1
+            }
+          ],
+          "description": "Nonnegative integer seed time in minutes (10080 = 7 days, 20160 = 14 days). -1 means unlimited: this dimension never qualifies a torrent for removal. Unlimited is greater than any finite value when comparing policies.",
+          "examples": [
+            10080,
+            20160,
+            -1
+          ],
+          "title": "Seed Time Minutes",
+          "type": "integer"
+        },
+        "ratio": {
+          "anyOf": [
+            {
+              "minimum": 0
+            },
+            {
+              "const": -1
+            }
+          ],
+          "description": "Finite, nonnegative uploaded/downloaded ratio. -1 means unlimited: this dimension never qualifies a torrent for removal. Unlimited is greater than any finite value when comparing policies.",
+          "examples": [
+            1.0,
+            2.0,
+            -1
+          ],
+          "title": "Ratio",
+          "type": "number"
+        }
+      },
+      "required": [
+        "seed_time_minutes",
+        "ratio"
+      ],
+      "title": "SeedLimits",
+      "type": "object"
+    },
+    "SetSeedLimitsCategoryConfig": {
+      "additionalProperties": false,
+      "description": "Explicitly managed category with a required action and optional complete override.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Exact, case-sensitive category to manage. YAML null (or an empty string) means uncategorized torrents. Names must be unique in set_seed_limits.",
+          "examples": [
+            "cross",
+            "upload",
+            null
+          ],
+          "title": "Name"
+        },
+        "override": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SeedLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replace both tracker-derived desired limits. Both fields are mandatory and each must be at least EVERY configured tracker's corresponding required limit, even for Stop actions or disabled jobs. -1 is unlimited. Startup checks these comparisons. Omit or use null to use tracker desired limits. Torrents with no matching tracker are still skipped.",
+          "examples": [
+            null,
+            {
+              "ratio": -1,
+              "seed_time_minutes": -1
+            }
+          ]
+        },
+        "action": {
+          "description": "Required qBittorrent action when a share limit is reached: Default uses the global action; Stop stops seeding; Remove removes the torrent but keeps files; RemoveWithContent also deletes files; EnableSuperSeeding enables super-seeding. There is no global tarr action or inheritance. Use Stop for Arr-verified categories and let remove_stopped perform guarded removal.",
+          "enum": [
+            "Default",
+            "Stop",
+            "Remove",
+            "RemoveWithContent",
+            "EnableSuperSeeding"
+          ],
+          "examples": [
+            "Stop",
+            "RemoveWithContent"
+          ],
+          "title": "Action",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "action"
+      ],
+      "title": "SetSeedLimitsCategoryConfig",
+      "type": "object"
+    },
+    "SetSeedLimitsConfig": {
+      "additionalProperties": false,
+      "description": "Reconcile share limits only for explicitly listed categories with matching trackers.\n\nUses the maximum desired limit in each dimension across matching trackers;\nunlimited dominates. A complete category override replaces both limits.\nUnlisted categories and torrents without a matching tracker remain untouched.\nSets inactive-seeding time to unlimited and MatchAny semantics. Runs before\nremove_stopped so guarded removal sees updated active limits.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Enable share-limit reconciliation. Disabled by default.",
+          "examples": [
+            false,
+            true
+          ],
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "categories": {
+          "description": "Opt-in list of exact categories. Each entry requires name and action; names must be unique (null and empty string both mean uncategorized). Defaults to []: no torrents are managed. No tracker match means no change, even with override.",
+          "examples": [
+            [
+              {
+                "action": "Stop",
+                "name": "radarr"
+              }
+            ],
+            [
+              {
+                "action": "Stop",
+                "name": "upload",
+                "override": {
+                  "ratio": -1,
+                  "seed_time_minutes": -1
+                }
+              }
+            ]
+          ],
+          "items": {
+            "$ref": "#/$defs/SetSeedLimitsCategoryConfig"
+          },
+          "title": "Categories",
+          "type": "array"
+        }
+      },
+      "title": "SetSeedLimitsConfig",
+      "type": "object"
+    },
+    "TrackerConfig": {
+      "additionalProperties": false,
+      "description": "Retention policy for a tracker. Every matching tracker applies to a torrent.\n\nEach desired limit must be at least its corresponding required limit; equality\nis allowed and -1 (unlimited) is greater than finite values. Startup enforces\nthese comparisons. Torrents without any matching tracker are left alone by\nset_seed_limits, remove_stopped, and maintain_free_space.",
+      "properties": {
+        "name": {
+          "description": "Tracker display name used in logs.",
+          "examples": [
+            "Example"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "hosts": {
+          "description": "Announce hostnames, without URL schemes or paths. Matching is case-insensitive and includes subdomains. All matching configured trackers apply once each.",
+          "examples": [
+            [
+              "tracker.example.org"
+            ]
+          ],
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Hosts",
+          "type": "array"
+        },
+        "required": {
+          "$ref": "#/$defs/SeedLimits",
+          "description": "Minimum retention policy for remove_stopped and maintain_free_space. Every matched tracker must pass its required seed-time OR ratio threshold. remove_unregistered bypasses this policy.",
+          "examples": [
+            {
+              "ratio": 1.0,
+              "seed_time_minutes": 10080
+            }
+          ]
+        },
+        "desired": {
+          "$ref": "#/$defs/SeedLimits",
+          "description": "Share limits applied by set_seed_limits. Each field must be at least the corresponding required field. Across matching trackers, the maximum in each dimension wins; unlimited dominates. A category override replaces both.",
+          "examples": [
+            {
+              "ratio": 2.0,
+              "seed_time_minutes": 20160
+            }
+          ]
+        },
+        "delete_priority": {
+          "default": 0,
+          "description": "Free-space deletion priority; higher values are deleted first, then torrents with more swarm seeders. The effective priority is the MINIMUM across all matched trackers. Negative values are allowed. Priority never bypasses retention.",
+          "examples": [
+            0,
+            100,
+            -100
+          ],
+          "title": "Delete Priority",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "hosts",
+        "required",
+        "desired"
+      ],
+      "title": "TrackerConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "tarr configuration. Only qbittorrent and a nonempty trackers list are required.\n\nAll jobs are disabled by default. Start with --dry-run before enabling removal\nor share-limit changes. Run once, or poll with --daemon. Job order is\nremove_unregistered, set_seed_limits, remove_stopped, maintain_free_space,\ncleanup_empty_dirs. Jobs and interval_seconds belong at the root, never under\nqbittorrent. Unknown keys and invalid policies stop startup, even for disabled\njobs. The schema validates structure; startup also checks path safety, known\nArr references, category uniqueness, and comparisons between retention limits.",
+  "properties": {
+    "qbittorrent": {
+      "$ref": "#/$defs/QBittorrentConfig",
+      "description": "Required qBittorrent WebUI connection; contains no job or polling settings.",
+      "examples": [
+        {
+          "host": "http://localhost:8080",
+          "password": "replace-me",
+          "username": "admin"
+        }
+      ]
+    },
+    "interval_seconds": {
+      "default": 60,
+      "description": "Seconds between reconciliation passes with --daemon. Ignored for a single pass. A failed daemon pass is logged before the next attempt.",
+      "examples": [
+        60,
+        300
+      ],
+      "minimum": 1,
+      "title": "Interval Seconds",
+      "type": "integer"
+    },
+    "remove_unregistered": {
+      "$ref": "#/$defs/RemoveUnregisteredConfig",
+      "description": "Delete unregistered torrents with content after a continuous delay. Bypasses tracker retention policies but respects category filters and Arr verification. Omit to leave disabled.",
+      "examples": [
+        {
+          "delay_minutes": 15,
+          "enabled": true,
+          "ignore_categories": [
+            null,
+            "upload"
+          ]
+        }
+      ]
+    },
+    "remove_stopped": {
+      "$ref": "#/$defs/RemoveStoppedConfig",
+      "description": "Remove completed, stopped torrents after a delay when an active share limit and every matched tracker's required policy pass. Arr verification applies. Omit to leave disabled; runs after set_seed_limits.",
+      "examples": [
+        {
+          "categories": [
+            {
+              "arr_verify_removal": [
+                "radarr"
+              ],
+              "name": "radarr"
+            }
+          ],
+          "delay_minutes": 15,
+          "enabled": true,
+          "on_delete": "RemoveWithContent"
+        }
+      ]
+    },
+    "maintain_free_space": {
+      "$ref": "#/$defs/MaintainFreeSpaceConfig",
+      "description": "Delete eligible torrents with content to reach a free-space target, ordered by effective tracker priority then swarm seeders. Tracker required policies and Arr verification apply. Omit to leave disabled.",
+      "examples": [
+        {
+          "categories": [
+            "autobrr"
+          ],
+          "enabled": true,
+          "free_space_threshold_gibi": 1024
+        }
+      ]
+    },
+    "set_seed_limits": {
+      "$ref": "#/$defs/SetSeedLimitsConfig",
+      "description": "Reconcile share limits for explicitly listed categories using matched tracker desired limits or complete overrides. Each category requires an action. Omit to leave disabled.",
+      "examples": [
+        {
+          "categories": [
+            {
+              "action": "RemoveWithContent",
+              "name": "cross"
+            },
+            {
+              "action": "Stop",
+              "name": "upload",
+              "override": {
+                "ratio": -1,
+                "seed_time_minutes": -1
+              }
+            },
+            {
+              "action": "Stop",
+              "name": "radarr"
+            }
+          ],
+          "enabled": true
+        }
+      ]
+    },
+    "cleanup_empty_dirs": {
+      "$ref": "#/$defs/CleanupEmptyDirsConfig",
+      "description": "Prune old, empty immediate child directories on locally mounted storage, protecting symlinks and paths used by every current torrent. Runs last. Omit to leave disabled.",
+      "examples": [
+        {
+          "directories": [
+            "/downloads/cross-seed"
+          ],
+          "enabled": false,
+          "min_age_minutes": 60,
+          "name_pattern": "*--????????"
+        }
+      ]
+    },
+    "trackers": {
+      "description": "Required nonempty tracker policies. All matching announce hostnames (including subdomains) apply. Required limits guard removal; desired limits control share settings. No matching tracker means no action except remove_unregistered.",
+      "examples": [
+        [
+          {
+            "delete_priority": 0,
+            "desired": {
+              "ratio": 2.0,
+              "seed_time_minutes": 20160
+            },
+            "hosts": [
+              "tracker.example.org"
+            ],
+            "name": "Example",
+            "required": {
+              "ratio": 1.0,
+              "seed_time_minutes": 10080
+            }
+          }
+        ]
+      ],
+      "items": {
+        "$ref": "#/$defs/TrackerConfig"
+      },
+      "minItems": 1,
+      "title": "Trackers",
+      "type": "array"
+    },
+    "logging": {
+      "$ref": "#/$defs/LoggingConfig",
+      "description": "Structured stdout and optional rotating file logs; defaults to INFO/logfmt.",
+      "examples": [
+        {
+          "format": "logfmt",
+          "level": "INFO"
+        }
+      ]
+    },
+    "arrs": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ArrConfig"
+      },
+      "description": "Optional named Radarr/Sonarr connections referenced by removal categories' arr_verify_removal lists. Names are case-sensitive; unknown references fail startup. Defaults to {}. Checks guard only tarr's deletions, not other tools or qBittorrent's autonomous removal.",
+      "examples": [
+        {
+          "radarr": {
+            "api_key": "replace-me",
+            "host": "http://radarr:7878"
+          }
+        }
+      ],
+      "title": "Arrs",
+      "type": "object"
+    }
+  },
+  "required": [
+    "qbittorrent",
+    "trackers"
+  ],
+  "title": "Config",
+  "type": "object",
+  "examples": [
+    {
+      "qbittorrent": {
+        "host": "http://localhost:8080",
+        "password": "replace-me",
+        "username": "admin"
+      },
+      "trackers": [
+        {
+          "delete_priority": 0,
+          "desired": {
+            "ratio": 2.0,
+            "seed_time_minutes": 20160
+          },
+          "hosts": [
+            "tracker.example.org"
+          ],
+          "name": "Example",
+          "required": {
+            "ratio": 1.0,
+            "seed_time_minutes": 10080
+          }
+        }
+      ]
+    },
+    {
+      "qbittorrent": {
+        "host": "http://localhost:8080",
+        "password": "replace-me",
+        "username": "admin"
+      },
+      "interval_seconds": 60,
+      "remove_unregistered": {
+        "delay_minutes": 15,
+        "enabled": true,
+        "ignore_categories": [
+          null,
+          "upload"
+        ]
+      },
+      "remove_stopped": {
+        "categories": [
+          {
+            "arr_verify_removal": [
+              "radarr"
+            ],
+            "name": "radarr"
+          }
+        ],
+        "delay_minutes": 15,
+        "enabled": true,
+        "on_delete": "RemoveWithContent"
+      },
+      "maintain_free_space": {
+        "categories": [
+          "autobrr"
+        ],
+        "enabled": true,
+        "free_space_threshold_gibi": 1024
+      },
+      "set_seed_limits": {
+        "categories": [
+          {
+            "action": "RemoveWithContent",
+            "name": "cross"
+          },
+          {
+            "action": "Stop",
+            "name": "upload",
+            "override": {
+              "ratio": -1,
+              "seed_time_minutes": -1
+            }
+          },
+          {
+            "action": "Stop",
+            "name": "radarr"
+          }
+        ],
+        "enabled": true
+      },
+      "cleanup_empty_dirs": {
+        "directories": [
+          "/downloads/cross-seed"
+        ],
+        "enabled": false,
+        "min_age_minutes": 60,
+        "name_pattern": "*--????????"
+      },
+      "trackers": [
+        {
+          "delete_priority": 0,
+          "desired": {
+            "ratio": 2.0,
+            "seed_time_minutes": 20160
+          },
+          "hosts": [
+            "tracker.example.org"
+          ],
+          "name": "Example",
+          "required": {
+            "ratio": 1.0,
+            "seed_time_minutes": 10080
+          }
+        }
+      ],
+      "logging": {
+        "format": "logfmt",
+        "level": "INFO"
+      },
+      "arrs": {
+        "radarr": {
+          "api_key": "replace-me",
+          "host": "http://radarr:7878"
+        }
+      }
+    }
+  ]
+}

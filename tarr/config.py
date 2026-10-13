@@ -20,9 +20,33 @@ def _check_limit(value: float) -> float:
 
 
 # a number of minutes, or -1 for unlimited
-SeedTimeMinutes = Annotated[int, AfterValidator(_check_limit)]
+SeedTimeMinutes = Annotated[
+    int,
+    AfterValidator(_check_limit),
+    Field(
+        description=(
+            "Nonnegative integer seed time in minutes (10080 = 7 days, 20160 = 14 days). "
+            "-1 means unlimited: this dimension never qualifies a torrent for removal. "
+            "Unlimited is greater than any finite value when comparing policies."
+        ),
+        examples=[10080, 20160, -1],
+        json_schema_extra={"anyOf": [{"minimum": 0}, {"const": UNLIMITED}]},
+    ),
+]
 # a share ratio, or -1 for unlimited
-Ratio = Annotated[float, AfterValidator(_check_limit)]
+Ratio = Annotated[
+    float,
+    AfterValidator(_check_limit),
+    Field(
+        description=(
+            "Finite, nonnegative uploaded/downloaded ratio. -1 means unlimited: this "
+            "dimension never qualifies a torrent for removal. Unlimited is greater "
+            "than any finite value when comparing policies."
+        ),
+        examples=[1.0, 2.0, -1],
+        json_schema_extra={"anyOf": [{"minimum": 0}, {"const": UNLIMITED}]},
+    ),
+]
 ShareLimitAction = Literal[
     "Default",
     "Stop",
@@ -44,6 +68,12 @@ def category_is_included(
 
 
 class SeedLimits(BaseModel):
+    """A complete seed policy; both seed_time_minutes and ratio are required.
+
+    Removal requires reaching the seed time OR ratio, not both. If both are -1,
+    this policy prevents removal. Limits are validated even for disabled jobs.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     seed_time_minutes: SeedTimeMinutes
@@ -55,13 +85,50 @@ def limit_at_least(value: float, minimum: float) -> bool:
 
 
 class TrackerConfig(BaseModel):
+    """Retention policy for a tracker. Every matching tracker applies to a torrent.
+
+    Each desired limit must be at least its corresponding required limit; equality
+    is allowed and -1 (unlimited) is greater than finite values. Startup enforces
+    these comparisons. Torrents without any matching tracker are left alone by
+    set_seed_limits, remove_stopped, and maintain_free_space.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    name: str
-    hosts: list[str] = Field(min_length=1)
-    required: SeedLimits
-    desired: SeedLimits
-    delete_priority: int = 0
+    name: str = Field(description="Tracker display name used in logs.", examples=["Example"])
+    hosts: list[str] = Field(
+        min_length=1,
+        description=(
+            "Announce hostnames, without URL schemes or paths. Matching is case-insensitive "
+            "and includes subdomains. All matching configured trackers apply once each."
+        ),
+        examples=[["tracker.example.org"]],
+    )
+    required: SeedLimits = Field(
+        description=(
+            "Minimum retention policy for remove_stopped and maintain_free_space. Every "
+            "matched tracker must pass its required seed-time OR ratio threshold. "
+            "remove_unregistered bypasses this policy."
+        ),
+        examples=[{"seed_time_minutes": 10080, "ratio": 1.0}],
+    )
+    desired: SeedLimits = Field(
+        description=(
+            "Share limits applied by set_seed_limits. Each field must be at least the "
+            "corresponding required field. Across matching trackers, the maximum in "
+            "each dimension wins; unlimited dominates. A category override replaces both."
+        ),
+        examples=[{"seed_time_minutes": 20160, "ratio": 2.0}],
+    )
+    delete_priority: int = Field(
+        default=0,
+        description=(
+            "Free-space deletion priority; higher values are deleted first, then torrents "
+            "with more swarm seeders. The effective priority is the MINIMUM across all "
+            "matched trackers. Negative values are allowed. Priority never bypasses retention."
+        ),
+        examples=[0, 100, -100],
+    )
 
     @model_validator(mode="after")
     def _validate_desired_limits(self) -> TrackerConfig:
@@ -82,12 +149,37 @@ class TrackerConfig(BaseModel):
 
 
 class LoggingConfig(BaseModel):
+    """Structured logs always go to stdout; optionally also write rotating files."""
+
     model_config = ConfigDict(extra="forbid")
 
-    level: str = "INFO"
-    format: Literal["logfmt", "json"] = "logfmt"
-    file: pathlib.Path | None = None
-    file_count: int = Field(default=20, ge=1)
+    level: str = Field(
+        default="INFO",
+        description=(
+            "Python log level, case-insensitive: DEBUG, INFO, WARNING, ERROR, CRITICAL, "
+            "or NOTSET (WARN and FATAL aliases are also accepted)."
+        ),
+        examples=["INFO", "DEBUG"],
+    )
+    format: Literal["logfmt", "json"] = Field(
+        default="logfmt",
+        description="Structured output format for both stdout and optional file logs.",
+        examples=["logfmt", "json"],
+    )
+    file: pathlib.Path | None = Field(
+        default=None,
+        description=(
+            "Optional log file path; omit or use null for stdout only. Files rotate at "
+            "10 MiB. The process needs permission to create and write the file."
+        ),
+        examples=["/var/log/tarr/tarr.log", None],
+    )
+    file_count: int = Field(
+        default=20,
+        ge=1,
+        description="Number of rotated backup log files to retain when file logging is enabled.",
+        examples=[20],
+    )
 
     @field_validator("level")
     @classmethod
@@ -99,10 +191,30 @@ class LoggingConfig(BaseModel):
 
 
 class RemovalCategoryConfig(BaseModel):
+    """A removal category with optional per-job Radarr/Sonarr queue verification."""
+
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None
-    arr_verify_removal: list[str] = Field(default_factory=list)
+    name: str | None = Field(
+        description=(
+            "Exact, case-sensitive qBittorrent category name. YAML null (or an empty string) "
+            "means torrents without a category. ignore_categories always takes precedence."
+        ),
+        examples=["radarr", None],
+    )
+    arr_verify_removal: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names from the top-level arrs mapping; defaults to []. Immediately before "
+            "removal, every named instance's /api/v3/queue is checked, including all pages "
+            "and unknown items. Any matching downloadId blocks removal regardless of status. "
+            "Unreachable instances, authentication failures, or invalid responses also block "
+            "removal. Unknown names fail startup. Checks apply only to this job/category "
+            "and run during dry runs too. Use action: Stop in set_seed_limits so qBittorrent "
+            "cannot automatically delete before verification."
+        ),
+        examples=[[], ["radarr"], ["radarr", "radarr4k"]],
+    )
 
     @field_validator("name")
     @classmethod
@@ -118,10 +230,23 @@ def removal_category_name(category: RemovalCategory) -> str | None:
 
 
 class ArrConfig(BaseModel):
+    """Connection to a named Radarr or Sonarr instance for guarded torrent removal."""
+
     model_config = ConfigDict(extra="forbid")
 
-    host: str
-    api_key: str = Field(min_length=1, repr=False)
+    host: str = Field(
+        description=(
+            "HTTP(S) base URL, optionally including a reverse-proxy base path. Credentials, "
+            "query strings, and fragments are forbidden. Trailing slashes are stripped."
+        ),
+        examples=["http://radarr:7878", "https://media.example.org/sonarr"],
+    )
+    api_key: str = Field(
+        min_length=1,
+        repr=False,
+        description="Nonempty Radarr/Sonarr API key from Settings > General. Treat as a secret.",
+        examples=["replace-me"],
+    )
 
     @field_validator("host")
     @classmethod
@@ -142,15 +267,33 @@ class ArrConfig(BaseModel):
 
 
 class CategoryFilterConfig(BaseModel):
+    """Shared opt-in job settings and exact, case-sensitive include/exclude filters."""
+
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = False
-    # if set, only torrents in these categories are considered; a null entry
-    # represents torrents without a category
-    categories: list[RemovalCategory] | None = None
-    # torrents in these categories are never considered; a null entry represents
-    # torrents without a category
-    ignore_categories: list[str | None] = Field(default_factory=list)
+    enabled: bool = Field(
+        default=False,
+        description="Enable this removal job. Disabled by default; review settings with --dry-run.",
+        examples=[False, True],
+    )
+    categories: list[RemovalCategory] | None = Field(
+        default=None,
+        description=(
+            "Include only these exact categories; omit or use null to include all. An empty "
+            "list includes none. Entries may be strings, YAML null for uncategorized torrents, "
+            "or objects with name and arr_verify_removal. Verification is not inherited by "
+            "other jobs. ignore_categories always wins."
+        ),
+        examples=[None, ["autobrr", None], [{"name": "radarr", "arr_verify_removal": ["radarr"]}]],
+    )
+    ignore_categories: list[str | None] = Field(
+        default_factory=list,
+        description=(
+            "Never consider torrents in these exact categories, even if also included in "
+            "categories. YAML null represents uncategorized torrents. Defaults to []."
+        ),
+        examples=[[], [None, "upload"]],
+    )
 
     def includes_category(self, category: str | None) -> bool:
         names = (
@@ -187,20 +330,87 @@ class CategoryFilterConfig(BaseModel):
 
 
 class RemoveUnregisteredConfig(CategoryFilterConfig):
-    # wait this long after a tracker first reports a torrent as "unregistered"
-    # before deleting it (some trackers report it transiently)
-    delay_minutes: int = Field(default=0, ge=0)
+    """Delete torrents and content after a tracker continuously reports unregistered.
+
+    Tracker retention requirements do not apply to this job. Category exclusions
+    and any configured Arr verification still apply. Runs before all other jobs.
+    """
+
+    delay_minutes: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Wait this many minutes after first observing unregistered status, which some "
+            "trackers report transiently. Zero removes immediately. Timers are in memory "
+            "and reset on restart; positive delays are useful only with --daemon."
+        ),
+        examples=[15, 0],
+    )
 
 
 class RemoveStoppedConfig(CategoryFilterConfig):
-    # wait this long after first observing a torrent as completed and stopped before deleting it
-    delay_minutes: int = Field(default=0, ge=0)
-    # Remove keeps downloaded content; RemoveWithContent deletes it
-    on_delete: Literal["Remove", "RemoveWithContent"] = "Remove"
+    """Remove completed torrents that remain stopped (pausedUP or stoppedUP).
+
+    Requires reaching an active qBittorrent seed-time OR ratio limit AND passing
+    every matched tracker's required policy. No tracker match means no removal.
+    Inherited, manual, and set_seed_limits limits are respected. Both active limits
+    unlimited prevent removal. Runs after set_seed_limits, fetching updated limits.
+    Actively seeding torrents are left alone; resuming resets the stopped timer.
+    """
+
+    delay_minutes: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Minutes continuously observed as completed and stopped before removal. "
+            "Zero allows immediate removal once eligibility checks pass. Timers reset on "
+            "restart or if the torrent resumes/is incomplete; positive delays need --daemon."
+        ),
+        examples=[15, 0],
+    )
+    on_delete: Literal["Remove", "RemoveWithContent"] = Field(
+        default="Remove",
+        description="Remove keeps downloaded files; RemoveWithContent deletes them too.",
+        examples=["Remove", "RemoveWithContent"],
+    )
 
 
 class MaintainFreeSpaceConfig(CategoryFilterConfig):
-    free_space_threshold_gibi: int | None = Field(default=None, ge=0)
+    """Delete eligible torrents with content until qBittorrent reports enough free space.
+
+    Every matched tracker must pass its required seed-time OR ratio policy; no match
+    means no removal. Highest effective delete_priority goes first (the minimum
+    across matched trackers), then most swarm seeders. Desired limits and category
+    overrides do not govern eligibility. Space is re-read after each removal so
+    hard links are not assumed to reclaim space. Dry runs estimate from sizes.
+    Arr verification failures skip a candidate and continue to other torrents.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {"properties": {"enabled": {"const": True}}, "required": ["enabled"]},
+                    "then": {
+                        "properties": {"free_space_threshold_gibi": {"type": "integer"}},
+                        "required": ["free_space_threshold_gibi"],
+                    },
+                }
+            ]
+        },
+    )
+
+    free_space_threshold_gibi: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Target free space in GiB (1 GiB = 1024^3 bytes), measured by qBittorrent. "
+            "Required and non-null when enabled. Below this threshold, remove eligible "
+            "torrents until the target is met or no eligible candidates remain."
+        ),
+        examples=[1024, 100],
+    )
 
     @property
     def free_space_threshold_bytes(self) -> int:
@@ -216,12 +426,38 @@ class MaintainFreeSpaceConfig(CategoryFilterConfig):
 
 
 class SetSeedLimitsCategoryConfig(BaseModel):
+    """Explicitly managed category with a required action and optional complete override."""
+
     model_config = ConfigDict(extra="forbid")
 
-    # qBittorrent reports "" for torrents without a category, configured here as null.
-    name: str | None
-    override: SeedLimits | None = None
-    action: ShareLimitAction
+    name: str | None = Field(
+        description=(
+            "Exact, case-sensitive category to manage. YAML null (or an empty string) "
+            "means uncategorized torrents. Names must be unique in set_seed_limits."
+        ),
+        examples=["cross", "upload", None],
+    )
+    override: SeedLimits | None = Field(
+        default=None,
+        description=(
+            "Replace both tracker-derived desired limits. Both fields are mandatory and "
+            "each must be at least EVERY configured tracker's corresponding required "
+            "limit, even for Stop actions or disabled jobs. -1 is unlimited. Startup "
+            "checks these comparisons. Omit or use null to use tracker desired limits. "
+            "Torrents with no matching tracker are still skipped."
+        ),
+        examples=[None, {"seed_time_minutes": -1, "ratio": -1}],
+    )
+    action: ShareLimitAction = Field(
+        description=(
+            "Required qBittorrent action when a share limit is reached: Default uses the "
+            "global action; Stop stops seeding; Remove removes the torrent but keeps files; "
+            "RemoveWithContent also deletes files; EnableSuperSeeding enables super-seeding. "
+            "There is no global tarr action or inheritance. Use Stop for Arr-verified "
+            "categories and let remove_stopped perform guarded removal."
+        ),
+        examples=["Stop", "RemoveWithContent"],
+    )
 
     @field_validator("name")
     @classmethod
@@ -230,11 +466,40 @@ class SetSeedLimitsCategoryConfig(BaseModel):
 
 
 class SetSeedLimitsConfig(BaseModel):
+    """Reconcile share limits only for explicitly listed categories with matching trackers.
+
+    Uses the maximum desired limit in each dimension across matching trackers;
+    unlimited dominates. A complete category override replaces both limits.
+    Unlisted categories and torrents without a matching tracker remain untouched.
+    Sets inactive-seeding time to unlimited and MatchAny semantics. Runs before
+    remove_stopped so guarded removal sees updated active limits.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = False
-    # Only torrents whose exact category appears here are managed.
-    categories: list[SetSeedLimitsCategoryConfig] = Field(default_factory=list)
+    enabled: bool = Field(
+        default=False,
+        description="Enable share-limit reconciliation. Disabled by default.",
+        examples=[False, True],
+    )
+    categories: list[SetSeedLimitsCategoryConfig] = Field(
+        default_factory=list,
+        description=(
+            "Opt-in list of exact categories. Each entry requires name and action; names "
+            "must be unique (null and empty string both mean uncategorized). Defaults to "
+            "[]: no torrents are managed. No tracker match means no change, even with override."
+        ),
+        examples=[
+            [{"name": "radarr", "action": "Stop"}],
+            [
+                {
+                    "name": "upload",
+                    "action": "Stop",
+                    "override": {"seed_time_minutes": -1, "ratio": -1},
+                }
+            ],
+        ],
+    )
 
     @model_validator(mode="after")
     def _require_unique_categories(self) -> SetSeedLimitsConfig:
@@ -269,12 +534,67 @@ class CleanupDirectoryMapping(NamedTuple):
 
 
 class CleanupEmptyDirsConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Prune old empty directories left by qBittorrent or other tools; runs last.
 
-    enabled: bool = False
-    directories: list[str] = Field(default_factory=list)
-    name_pattern: str = "*--????????"
-    min_age_minutes: int = Field(default=60, ge=0)
+    Only immediate children of configured roots are scanned. Never removes roots,
+    symlinks, nonempty directories, or paths referenced by any current torrent,
+    regardless of category/state. No cleanup if the torrent listing fails or paths
+    are missing/relative. Uses rmdir only, never recursive deletion. Requires local
+    storage mounts and write permission; a remote qBittorrent host alone is insufficient.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {"properties": {"enabled": {"const": True}}, "required": ["enabled"]},
+                    "then": {
+                        "properties": {"directories": {"minItems": 1}},
+                        "required": ["directories"],
+                    },
+                }
+            ]
+        },
+    )
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable local empty-directory cleanup. Disabled by default.",
+        examples=[False, True],
+    )
+    directories: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Cleanup roots; at least one is required when enabled. A plain absolute path "
+            "means the same path in qBittorrent and tarr. For different mounts use "
+            "'qBittorrent-path:tarr-local-path' (qBittorrent first); only the local side "
+            "is scanned. Both sides must be absolute, non-root paths without '..'. "
+            "Plain and mapped roots can be mixed; conflicting mappings for the same "
+            "source fail startup. Most-specific source mappings protect torrent paths. "
+            "Defaults to []."
+        ),
+        examples=[["/downloads/cross-seed"], ["/downloads/cross-seed:/data/torrents/cross-seed"]],
+    )
+    name_pattern: str = Field(
+        default="*--????????",
+        description=(
+            "Glob matched against directory basenames, not paths. The default matches "
+            "qui's name--<8-character hash prefix> directories. Use '*' for every immediate "
+            "child. Must be nonempty, contain no slash/backslash, and not be '.' or '..'. "
+            "Quote patterns in YAML so '*' is not parsed as an alias."
+        ),
+        examples=["*--????????", "*"],
+    )
+    min_age_minutes: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Minimum directory age in minutes, measured from its modification time. "
+            "Zero disables the age guard; emptiness and torrent-path protection still apply."
+        ),
+        examples=[60, 0],
+    )
 
     @field_validator("directories", mode="before")
     @classmethod
@@ -317,26 +637,157 @@ class CleanupEmptyDirsConfig(BaseModel):
 
 
 class QBittorrentConfig(BaseModel):
+    """qBittorrent WebUI connection settings only; polling and jobs belong at the root."""
+
     model_config = ConfigDict(extra="forbid")
 
-    host: str
-    username: str
-    password: str
+    host: str = Field(
+        description=(
+            "qBittorrent WebUI base URL reachable from tarr. With the included Docker "
+            "Compose setup, use http://qbittorrent:8080 rather than localhost."
+        ),
+        examples=["http://localhost:8080", "http://qbittorrent:8080"],
+    )
+    username: str = Field(description="WebUI login username.", examples=["admin"])
+    password: str = Field(
+        description="WebUI login password. Replace the placeholder and treat as a secret.",
+        examples=["replace-me"],
+    )
 
 
 class Config(BaseModel):
+    """tarr configuration. Only qbittorrent and a nonempty trackers list are required.
+
+    All jobs are disabled by default. Start with --dry-run before enabling removal
+    or share-limit changes. Run once, or poll with --daemon. Job order is
+    remove_unregistered, set_seed_limits, remove_stopped, maintain_free_space,
+    cleanup_empty_dirs. Jobs and interval_seconds belong at the root, never under
+    qbittorrent. Unknown keys and invalid policies stop startup, even for disabled
+    jobs. The schema validates structure; startup also checks path safety, known
+    Arr references, category uniqueness, and comparisons between retention limits.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    qbittorrent: QBittorrentConfig
-    interval_seconds: int = Field(default=60, ge=1)
-    remove_unregistered: RemoveUnregisteredConfig = Field(default_factory=RemoveUnregisteredConfig)
-    remove_stopped: RemoveStoppedConfig = Field(default_factory=RemoveStoppedConfig)
-    maintain_free_space: MaintainFreeSpaceConfig = Field(default_factory=MaintainFreeSpaceConfig)
-    set_seed_limits: SetSeedLimitsConfig = Field(default_factory=SetSeedLimitsConfig)
-    cleanup_empty_dirs: CleanupEmptyDirsConfig = Field(default_factory=CleanupEmptyDirsConfig)
-    trackers: list[TrackerConfig] = Field(min_length=1)
-    logging: LoggingConfig = Field(default_factory=LoggingConfig)
-    arrs: dict[str, ArrConfig] = Field(default_factory=dict)
+    qbittorrent: QBittorrentConfig = Field(
+        description="Required qBittorrent WebUI connection; contains no job or polling settings.",
+        examples=[{"host": "http://localhost:8080", "username": "admin", "password": "replace-me"}],
+    )
+    interval_seconds: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "Seconds between reconciliation passes with --daemon. Ignored for a single "
+            "pass. A failed daemon pass is logged before the next attempt."
+        ),
+        examples=[60, 300],
+    )
+    remove_unregistered: RemoveUnregisteredConfig = Field(
+        default_factory=RemoveUnregisteredConfig,
+        description=(
+            "Delete unregistered torrents with content after a continuous delay. Bypasses "
+            "tracker retention policies but respects category filters and Arr verification. "
+            "Omit to leave disabled."
+        ),
+        examples=[{"enabled": True, "delay_minutes": 15, "ignore_categories": [None, "upload"]}],
+    )
+    remove_stopped: RemoveStoppedConfig = Field(
+        default_factory=RemoveStoppedConfig,
+        description=(
+            "Remove completed, stopped torrents after a delay when an active share limit "
+            "and every matched tracker's required policy pass. Arr verification applies. "
+            "Omit to leave disabled; runs after set_seed_limits."
+        ),
+        examples=[
+            {
+                "enabled": True,
+                "delay_minutes": 15,
+                "categories": [{"name": "radarr", "arr_verify_removal": ["radarr"]}],
+                "on_delete": "RemoveWithContent",
+            }
+        ],
+    )
+    maintain_free_space: MaintainFreeSpaceConfig = Field(
+        default_factory=MaintainFreeSpaceConfig,
+        description=(
+            "Delete eligible torrents with content to reach a free-space target, ordered "
+            "by effective tracker priority then swarm seeders. Tracker required policies "
+            "and Arr verification apply. Omit to leave disabled."
+        ),
+        examples=[{"enabled": True, "categories": ["autobrr"], "free_space_threshold_gibi": 1024}],
+    )
+    set_seed_limits: SetSeedLimitsConfig = Field(
+        default_factory=SetSeedLimitsConfig,
+        description=(
+            "Reconcile share limits for explicitly listed categories using matched tracker "
+            "desired limits or complete overrides. Each category requires an action. "
+            "Omit to leave disabled."
+        ),
+        examples=[
+            {
+                "enabled": True,
+                "categories": [
+                    {"name": "cross", "action": "RemoveWithContent"},
+                    {
+                        "name": "upload",
+                        "action": "Stop",
+                        "override": {"seed_time_minutes": -1, "ratio": -1},
+                    },
+                    {"name": "radarr", "action": "Stop"},
+                ],
+            }
+        ],
+    )
+    cleanup_empty_dirs: CleanupEmptyDirsConfig = Field(
+        default_factory=CleanupEmptyDirsConfig,
+        description=(
+            "Prune old, empty immediate child directories on locally mounted storage, "
+            "protecting symlinks and paths used by every current torrent. Runs last. "
+            "Omit to leave disabled."
+        ),
+        examples=[
+            {
+                "enabled": False,
+                "directories": ["/downloads/cross-seed"],
+                "name_pattern": "*--????????",
+                "min_age_minutes": 60,
+            }
+        ],
+    )
+    trackers: list[TrackerConfig] = Field(
+        min_length=1,
+        description=(
+            "Required nonempty tracker policies. All matching announce hostnames (including "
+            "subdomains) apply. Required limits guard removal; desired limits control share "
+            "settings. No matching tracker means no action except remove_unregistered."
+        ),
+        examples=[
+            [
+                {
+                    "name": "Example",
+                    "hosts": ["tracker.example.org"],
+                    "required": {"seed_time_minutes": 10080, "ratio": 1.0},
+                    "desired": {"seed_time_minutes": 20160, "ratio": 2.0},
+                    "delete_priority": 0,
+                }
+            ]
+        ],
+    )
+    logging: LoggingConfig = Field(
+        default_factory=LoggingConfig,
+        description="Structured stdout and optional rotating file logs; defaults to INFO/logfmt.",
+        examples=[{"level": "INFO", "format": "logfmt"}],
+    )
+    arrs: dict[str, ArrConfig] = Field(
+        default_factory=dict,
+        description=(
+            "Optional named Radarr/Sonarr connections referenced by removal categories' "
+            "arr_verify_removal lists. Names are case-sensitive; unknown references fail "
+            "startup. Defaults to {}. Checks guard only tarr's deletions, not other tools "
+            "or qBittorrent's autonomous removal."
+        ),
+        examples=[{"radarr": {"host": "http://radarr:7878", "api_key": "replace-me"}}],
+    )
 
     @model_validator(mode="after")
     def _require_known_arrs(self) -> Config:

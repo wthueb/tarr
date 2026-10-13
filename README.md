@@ -32,14 +32,25 @@ mutating qBittorrent or the filesystem.
 
 ## Quick start
 
-Requirements are Python 3.12 or newer and a reachable qBittorrent WebUI. Copy
-the annotated example, enter the WebUI credentials, and start with a dry run:
+Requirements are Python 3.12 or newer and a reachable qBittorrent WebUI.
+Generate a minimal `config.yaml` from the schema's examples:
 
 ```nu
-cp config.example.yaml config.yaml
 uv sync
+uv run python -m tarr.schema --example | save config.yaml
+```
+
+Enter your WebUI credentials and tracker policies, then enable the jobs you want
+using the schema's editor completions and hover documentation. The minimal starter
+leaves every job disabled. Start with a dry run:
+
+```nu
 uv run tarr --config config.yaml --dry-run
 ```
+
+For an expanded configuration demonstrating all sections, Arr verification, and
+category overrides, use `--example full` instead. That example enables removal and
+share-limit jobs; review its placeholder values and policies before using it.
 
 Run a real pass by removing `--dry-run`, or poll continuously:
 
@@ -54,8 +65,27 @@ logged before the next one is attempted.
 
 ## Configuration model
 
-See [`config.example.yaml`](config.example.yaml) for the complete, documented
-schema. Its top-level sections are:
+[`config.schema.json`](config.schema.json) is the configuration reference, generated
+from the Pydantic models. Every field includes a description and examples; defaults,
+units, safety rules, and interactions between jobs are documented at the relevant
+field. The schema also contains complete minimal and expanded examples, so no
+separate example YAML file is needed.
+
+YAML editors supporting the YAML language server provide validation, completion,
+and hover documentation when `config.yaml` starts with:
+
+```yaml
+# yaml-language-server: $schema=./config.schema.json
+```
+
+Keep the schema alongside the config file, or replace the relative path with
+`https://raw.githubusercontent.com/wthueb/tarr/main/config.schema.json`.
+Generated starters already include the directive. The schema checks types, required
+fields, unknown keys, numeric limits, and enabled-job requirements; startup
+validation also checks custom rules such as path safety, known Arr instances,
+unique category names, and comparisons between tracker/category limits.
+
+Its top-level sections are:
 
 - `logging`: log level, output format, and optional rotating file output.
 - `interval_seconds`: polling interval in daemon mode (defaults to 60 seconds).
@@ -306,6 +336,17 @@ uv run ruff check .
 uv run ruff format --check .
 uv run ty check
 ```
+
+After changing configuration models, regenerate the checked-in editor schema:
+
+```nu
+uv run python -m tarr.schema | save --force config.schema.json
+```
+
+Edit field descriptions and examples in `tarr/config.py`, not in the generated JSON.
+The YAML starter generator uses those same schema examples. Tests verify schema/model
+synchronization, documentation coverage, field examples, and both generated starters
+against the schema and startup validation.
 
 Source lives in [`tarr/`](tarr/), with configuration models in `config.py`, job
 orchestration in `main.py`, filesystem cleanup in `cleanup.py`, and structured
