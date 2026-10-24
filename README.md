@@ -79,7 +79,7 @@ and hover documentation when `config.yaml` starts with:
 ```
 
 Keep the schema alongside the config file, or replace the relative path with
-`https://raw.githubusercontent.com/wthueb/tarr/main/config.schema.json`.
+`https://raw.githubusercontent.com/wthueb/tarr/master/config.schema.json`.
 Generated starters already include the directive. The schema checks types, required
 fields, unknown keys, numeric limits, and enabled-job requirements; startup
 validation also checks custom rules such as path safety, known Arr instances,
