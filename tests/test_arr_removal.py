@@ -139,6 +139,11 @@ def test_unprotected_category_does_not_query_arr(monkeypatch):
     request.assert_not_called()
 
 
+@pytest.fixture(autouse=True)
+def isolate_deletion_policy(policy_deletion):
+    pass
+
+
 class FakeClient:
     def __init__(self, torrents):
         self.torrents = torrents
@@ -180,6 +185,7 @@ def make_config(job, *, categories=None):
                 "username": "user",
                 "password": "pass",
             },
+            "content_deletion": {"path_mappings": ["/downloads"]},
             job: {
                 "enabled": True,
                 "categories": categories
@@ -190,7 +196,11 @@ def make_config(job, *, categories=None):
                         "arr_verify_removal": ["movies", "movies4k"],
                     }
                 ],
-                **({"free_space_threshold_gibi": 2} if job == "maintain_free_space" else {}),
+                **(
+                    {"free_space_threshold_gibi": 2, "free_space_path": "/downloads"}
+                    if job == "maintain_free_space"
+                    else {}
+                ),
             },
             "trackers": [
                 {
@@ -210,7 +220,7 @@ def make_config(job, *, categories=None):
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_every_removal_job_checks_all_instances(monkeypatch, job, queued, dry_run):
     torrent = make_torrent()
-    check = Mock(side_effect=[False, queued])
+    check = Mock(side_effect=[False, queued] * (2 if job == "maintain_free_space" else 1))
     monkeypatch.setattr("tarr.arr.torrent_in_queue", check)
     config = make_config(job)
     unregistered = {}
@@ -224,10 +234,13 @@ def test_every_removal_job_checks_all_instances(monkeypatch, job, queued, dry_ru
         stopped_first_seen=stopped,
     )
 
-    assert check.call_args_list == [
+    expected_checks = [
         ((config.arrs["movies"], HASH),),
         ((config.arrs["movies4k"], HASH),),
     ]
+    assert check.call_args_list == expected_checks * (
+        2 if job == "maintain_free_space" and not queued else 1
+    )
     if queued or dry_run:
         torrent.delete.assert_not_called()
         if job == "remove_stopped":

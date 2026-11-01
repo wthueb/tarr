@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 import pathlib
 from collections.abc import Iterable
-from typing import Annotated, Literal, NamedTuple
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 import yaml
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from tarr.storage import DirectoryMapping, mapped_path, validate_mappings
 
 # a seed-time/ratio limit of -1 means "unlimited" (qBittorrent's own convention: -1 is no limit)
 UNLIMITED = -1
@@ -376,12 +378,13 @@ class RemoveStoppedConfig(CategoryFilterConfig):
 
 
 class MaintainFreeSpaceConfig(CategoryFilterConfig):
-    """Delete eligible torrents with content until qBittorrent reports enough free space.
+    """Delete eligible torrents with content until the target filesystem has enough free space.
 
     Every matched tracker must pass its required seed-time OR ratio policy; no match
     means no removal. Highest effective delete_priority goes first (the minimum
     across matched trackers), then most swarm seeders. Desired limits and category
-    overrides do not govern eligibility. Space is re-read after each removal so
+    overrides do not govern eligibility. Content deletion is serialized and verified
+    on read-only local mounts. Free space is measured directly on the target filesystem;
     hard links are not assumed to reclaim space. Dry runs estimate from sizes.
     Arr verification failures skip a candidate and continue to other torrents.
     """
@@ -393,8 +396,11 @@ class MaintainFreeSpaceConfig(CategoryFilterConfig):
                 {
                     "if": {"properties": {"enabled": {"const": True}}, "required": ["enabled"]},
                     "then": {
-                        "properties": {"free_space_threshold_gibi": {"type": "integer"}},
-                        "required": ["free_space_threshold_gibi"],
+                        "properties": {
+                            "free_space_threshold_gibi": {"type": "integer"},
+                            "free_space_path": {"type": "string"},
+                        },
+                        "required": ["free_space_threshold_gibi", "free_space_path"],
                     },
                 }
             ]
@@ -405,12 +411,30 @@ class MaintainFreeSpaceConfig(CategoryFilterConfig):
         default=None,
         ge=0,
         description=(
-            "Target free space in GiB (1 GiB = 1024^3 bytes), measured by qBittorrent. "
+            "Target free space in GiB (1 GiB = 1024^3 bytes), measured on free_space_path. "
             "Required and non-null when enabled. Below this threshold, remove eligible "
             "torrents until the target is met or no eligible candidates remain."
         ),
         examples=[1024, 100],
     )
+
+    free_space_path: pathlib.Path | None = Field(
+        default=None,
+        description=(
+            "Target filesystem directory in qBittorrent's namespace. Required when enabled "
+            "and covered by content_deletion.path_mappings. tarr measures locally available "
+            "bytes here and only deletes content on this filesystem. Must be absolute, "
+            "non-root, without '..'. Read-only local mounts are sufficient."
+        ),
+        examples=["/downloads", None],
+    )
+
+    @field_validator("free_space_path")
+    @classmethod
+    def _validate_free_space_path(cls, value: pathlib.Path | None) -> pathlib.Path | None:
+        if value is not None:
+            DirectoryMapping.parse(str(value))
+        return value
 
     @property
     def free_space_threshold_bytes(self) -> int:
@@ -422,6 +446,8 @@ class MaintainFreeSpaceConfig(CategoryFilterConfig):
             raise ValueError(
                 "free_space_threshold_gibi is required when maintain_free_space is enabled"
             )
+        if self.enabled and self.free_space_path is None:
+            raise ValueError("free_space_path is required when maintain_free_space is enabled")
         return self
 
 
@@ -513,24 +539,62 @@ class SetSeedLimitsConfig(BaseModel):
         return next((item for item in self.categories if item.name == category), None)
 
 
-class CleanupDirectoryMapping(NamedTuple):
-    qbittorrent_path: pathlib.Path
-    local_path: pathlib.Path
+CleanupDirectoryMapping = DirectoryMapping
 
+
+class ContentDeletionConfig(BaseModel):
+    """Verify one outstanding content deletion across all removal jobs, in memory only.
+
+    Mount download/staging storage read-only. Timeout retains the pending guard across
+    daemon passes, but restarting tarr loses it. Unlink completion is trusted without
+    requiring an expected byte increase; open handles can delay actual space recovery.
+    qBittorrent's autonomous actions and other processes are outside this guard.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path_mappings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Download and staging roots visible to tarr. Use absolute non-root paths or "
+            "'qBittorrent-path:tarr-path'; the most-specific source wins. Conflicting sources "
+            "and '..' are forbidden. Required when any enabled job deletes content. "
+            "Symlink paths and inaccessible mounts are skipped. Confirmation tracks files "
+            "that exist before deletion without requiring a particular content layout."
+        ),
+        examples=[["/downloads", "/incomplete"], ["/downloads:/data/downloads"]],
+    )
+    poll_interval_seconds: int = Field(
+        default=2,
+        ge=1,
+        description="Seconds between stop/deletion confirmation checks; must be positive.",
+        examples=[2, 5],
+    )
+    timeout_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Maximum seconds waiting per operation, at least poll_interval_seconds. "
+            "An unconfirmed deletion blocks all further content deletion until confirmed, "
+            "including later daemon passes. A one-shot run exits nonzero if unresolved."
+        ),
+        examples=[300, 600],
+    )
+
+    @field_validator("path_mappings")
     @classmethod
-    def parse(cls, value: str) -> CleanupDirectoryMapping:
-        parts = value.split(":")
-        if len(parts) not in {1, 2}:
-            raise ValueError(
-                "cleanup directories must use 'qBittorrent-path:tarr-path' or one path"
-            )
-        paths = [pathlib.Path(part) for part in parts]
-        for path in paths:
-            if not path.is_absolute() or path == pathlib.Path(path.anchor) or ".." in path.parts:
-                raise ValueError(
-                    "cleanup directories must be absolute, non-root paths without '..'"
-                )
-        return cls(paths[0], paths[-1])
+    def _validate_mappings(cls, values: list[str]) -> list[str]:
+        return validate_mappings(values)
+
+    @property
+    def directory_mappings(self) -> list[DirectoryMapping]:
+        return [DirectoryMapping.parse(value) for value in self.path_mappings]
+
+    @model_validator(mode="after")
+    def _validate_timeout(self) -> ContentDeletionConfig:
+        if self.timeout_seconds < self.poll_interval_seconds:
+            raise ValueError("timeout_seconds must be at least poll_interval_seconds")
+        return self
 
 
 class CleanupEmptyDirsConfig(BaseModel):
@@ -606,9 +670,7 @@ class CleanupEmptyDirsConfig(BaseModel):
     @field_validator("directories")
     @classmethod
     def _validate_mappings(cls, value: list[str]) -> list[str]:
-        for directory in value:
-            CleanupDirectoryMapping.parse(directory)
-        return value
+        return validate_mappings(value)
 
     @property
     def directory_mappings(self) -> list[CleanupDirectoryMapping]:
@@ -625,14 +687,6 @@ class CleanupEmptyDirsConfig(BaseModel):
     def _require_directories(self) -> CleanupEmptyDirsConfig:
         if self.enabled and not self.directories:
             raise ValueError("directories are required when cleanup_empty_dirs is enabled")
-        destinations: dict[pathlib.Path, pathlib.Path] = {}
-        for mapping in self.directory_mappings:
-            previous = destinations.get(mapping.qbittorrent_path)
-            if previous is not None and previous != mapping.local_path:
-                raise ValueError(
-                    "a qBittorrent cleanup directory cannot map to multiple tarr paths"
-                )
-            destinations[mapping.qbittorrent_path] = mapping.local_path
         return self
 
 
@@ -667,11 +721,60 @@ class Config(BaseModel):
     Arr references, category uniqueness, and comparisons between retention limits.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "anyOf": [
+                            {
+                                "required": [job],
+                                "properties": {
+                                    job: {
+                                        "required": list(fields),
+                                        "properties": {
+                                            name: {"const": value} for name, value in fields.items()
+                                        },
+                                    }
+                                },
+                            }
+                            for job, fields in (
+                                ("remove_unregistered", {"enabled": True}),
+                                ("maintain_free_space", {"enabled": True}),
+                                (
+                                    "remove_stopped",
+                                    {"enabled": True, "on_delete": "RemoveWithContent"},
+                                ),
+                            )
+                        ]
+                    },
+                    "then": {
+                        "required": ["content_deletion"],
+                        "properties": {
+                            "content_deletion": {
+                                "required": ["path_mappings"],
+                                "properties": {"path_mappings": {"minItems": 1}},
+                            }
+                        },
+                    },
+                }
+            ]
+        },
+    )
 
     qbittorrent: QBittorrentConfig = Field(
         description="Required qBittorrent WebUI connection; contains no job or polling settings.",
         examples=[{"host": "http://localhost:8080", "username": "admin", "password": "replace-me"}],
+    )
+    content_deletion: ContentDeletionConfig = Field(
+        default_factory=ContentDeletionConfig,
+        description=(
+            "Shared read-only filesystem verification and serialized content deletion. "
+            "Configure mappings before enabling a job that deletes files. Pending state "
+            "is memory-only and is lost on restart."
+        ),
+        examples=[{"path_mappings": ["/downloads", "/incomplete"]}],
     )
     interval_seconds: int = Field(
         default=60,
@@ -714,7 +817,14 @@ class Config(BaseModel):
             "by effective tracker priority then swarm seeders. Tracker required policies "
             "and Arr verification apply. Omit to leave disabled."
         ),
-        examples=[{"enabled": True, "categories": ["autobrr"], "free_space_threshold_gibi": 1024}],
+        examples=[
+            {
+                "enabled": True,
+                "categories": ["autobrr"],
+                "free_space_threshold_gibi": 1024,
+                "free_space_path": "/downloads",
+            }
+        ],
     )
     set_seed_limits: SetSeedLimitsConfig = Field(
         default_factory=SetSeedLimitsConfig,
@@ -788,6 +898,26 @@ class Config(BaseModel):
         ),
         examples=[{"radarr": {"host": "http://radarr:7878", "api_key": "replace-me"}}],
     )
+
+    @model_validator(mode="after")
+    def _require_content_storage(self) -> Config:
+        deletes_content = (
+            self.remove_unregistered.enabled
+            or self.maintain_free_space.enabled
+            or (
+                self.remove_stopped.enabled and self.remove_stopped.on_delete == "RemoveWithContent"
+            )
+        )
+        if deletes_content and not self.content_deletion.path_mappings:
+            raise ValueError(
+                "configure content_deletion.path_mappings and mount storage read-only "
+                "before enabling content deletion"
+            )
+        if self.maintain_free_space.enabled:
+            path = self.maintain_free_space.free_space_path
+            assert path is not None
+            mapped_path(path, self.content_deletion.directory_mappings)
+        return self
 
     @model_validator(mode="after")
     def _require_known_arrs(self) -> Config:

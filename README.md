@@ -5,8 +5,9 @@ category-specific retention rules, removes torrents that are no longer useful,
 and keeps a configurable amount of disk space free. Run it once for a single
 reconciliation pass or leave it running as a daemon.
 
-The service talks to qBittorrent through its WebUI API. The optional
-`cleanup_empty_dirs` job also needs direct access to the download filesystem.
+The service talks to qBittorrent through its WebUI API. Jobs deleting content also
+need read-only access to download/staging storage; the optional
+`cleanup_empty_dirs` job needs writable access to its cleanup roots.
 Configuration is a strictly validated YAML file;
 unknown fields and invalid limits stop startup instead of being silently ignored.
 
@@ -19,7 +20,7 @@ Each job is independent and can be enabled or disabled:
 | `remove_unregistered` | Deletes a torrent and its content after a tracker continuously reports it as unregistered for a configured delay. |
 | `set_seed_limits` | Reconciles qBittorrent ratio, seed-time, limit action, and related share-limit settings for explicitly managed categories. |
 | `remove_stopped` | Removes completed, stopped torrents after a delay only when an active torrent limit and every matched tracker's required policy are met, optionally keeping downloaded content. |
-| `maintain_free_space` | When disk space is below the target, deletes eligible torrents and their content, rechecking qBittorrent's reported free space after each deletion. |
+| `maintain_free_space` | When locally measured disk space is below the target, deletes eligible content one torrent at a time, waiting for verified file removal. |
 | `cleanup_empty_dirs` | Prunes old, empty directories under explicitly configured roots, excluding paths referenced by any current torrent. |
 
 Jobs run in the order listed above. `set_seed_limits` runs before `remove_stopped`,
@@ -90,6 +91,7 @@ Its top-level sections are:
 - `logging`: log level, output format, and optional rotating file output.
 - `interval_seconds`: polling interval in daemon mode (defaults to 60 seconds).
 - `qbittorrent`: WebUI connection settings only (`host`, `username`, `password`).
+- `content_deletion`: shared storage mappings and confirmation timing for every job that deletes files.
 - `remove_unregistered`, `remove_stopped`, `set_seed_limits`, `maintain_free_space`,
   and `cleanup_empty_dirs`: independent job settings.
 - `trackers`: tracker hostnames, required and desired seed limits, and deletion priorities.
@@ -187,11 +189,77 @@ integers are supported. A torrent matching priorities `1000` and `-500` has effe
 priority `-500`, so a priority-zero torrent is removed first. Priority never bypasses
 eligibility. Logs include all matched tracker names and the effective priority.
 
-Torrents are deleted with content until qBittorrent reports enough free space or no
-eligible torrents remain. Free space is re-read after each deletion, so removing a
-hard link is not assumed to reclaim space while other links remain. Dry runs estimate
-reclaimed space from torrent sizes. Tracker lookup failures or missing/malformed
-eligibility data cannot authorize removal. Arr verification still applies.
+Free-space cleanup measures available bytes directly on `free_space_path`, translated
+from qBittorrent's namespace through `content_deletion.path_mappings`. It checks before
+selection, immediately before deletion, and after confirmed removal; qBittorrent's
+cached free-space report does not authorize deletions. Only content on the target
+filesystem is eligible. Removing a hard link receives no assumed space credit.
+Dry runs estimate reclaimed space from torrent sizes and label estimates explicitly.
+Tracker lookup failures or missing/malformed eligibility data cannot authorize
+removal. Arr verification still applies.
+
+### Verified content deletion and migration
+
+Every enabled job that deletes files now requires locally visible download/staging
+storage and explicit mappings. Existing enabled configurations without mappings or a
+free-space target path fail startup rather than falling back to API-only cleanup:
+
+```yaml
+content_deletion:
+  path_mappings:
+    - /downloads:/data/downloads
+    - /incomplete:/data/incomplete
+  poll_interval_seconds: 2
+  timeout_seconds: 300
+maintain_free_space:
+  enabled: true
+  free_space_threshold_gibi: 3072
+  free_space_path: /downloads
+```
+
+A plain mapping path means identical paths in both containers; the most-specific
+source mapping wins. Paths must be absolute, non-root, and contain no `..`.
+Conflicting mappings fail validation. Map each separately mounted storage root,
+including staging storage, and point `free_space_path` at the filesystem to protect.
+The included Compose example shares writable qBittorrent volumes with tarr through
+read-only mounts. Give tarr permission to list directories and inspect paths; it
+never unlinks torrent data itself. `cleanup_empty_dirs` is separate and still needs
+a writable mount for its configured roots; read-only mounts cannot prune directories.
+
+All three removal jobs share one in-memory gate: a new content deletion cannot start
+until qBittorrent no longer lists the previous torrent **and** its tracked files have
+disappeared. Empty directories do not block confirmation. tarr records only files
+that currently exist at the torrent's manifest paths in download/staging storage,
+including `.!qB` variants and files beneath a reported content directory. Shared
+save/staging directories are not recursively scanned for unrelated files. No specific
+layout or match between `content_path` and the manifest is required.
+
+If no files exist, confirmation requires only that qBittorrent no longer lists the
+torrent. Downloaded-byte counters and file progress do not need to be zero. Missing
+download subdirectories are allowed, but mapped storage roots must remain accessible
+and unchanged, even when no files were recorded. This also applies to free-space
+cleanup, which always remeasures actual available space rather than crediting sizes.
+Symlinks, inaccessible storage, unsafe paths, and moving torrents still fail closed.
+
+Active incomplete torrents are stopped before final inspection; tarr restores their
+previous activity if it abandons deletion before sending the request. For unregistered
+removal, tarr verifies the tracker error before stopping and preserves that evidence
+through its own stop operation, which can clear qBittorrent's tracker response.
+Category and Arr queue checks still run again immediately before deletion.
+
+Timeout defaults to 300 seconds, with checks every two seconds. Timeout or an uncertain
+API response retains the pending guard across daemon passes; content-removal jobs
+remain blocked until confirmation succeeds. Other jobs and torrent-only removal can
+continue. One-shot runs exit nonzero with an unconfirmed deletion. Dry runs never stop
+torrents, request deletion, or wait for completion.
+
+**Restarting tarr loses this guard.** Before restarting or resuming cleanup, check that
+qBittorrent has finished outstanding deletions. Run only one tarr process against this
+storage. No persistent state volume is used. Confirmation trusts unlink completion,
+not an expected byte increase: open handles, delayed block release, external activity,
+and one torrent larger than the deficit can still cause overshoot. This is not an
+exact-target guarantee. qBittorrent's autonomous removal actions and other tools are
+not serialized; use `Stop` plus tarr-managed removal where this protection is needed.
 
 ### Share limits
 
@@ -308,14 +376,19 @@ services:
 For these mounts, configure `tarr` with:
 
 ```yaml
+content_deletion:
+  path_mappings:
+    - "/downloads:/data/torrents"
+    - /incomplete
 cleanup_empty_dirs:
   enabled: true
   directories:
     - "/downloads/cross-seed:/data/torrents/cross-seed"
 ```
 
-The included compose file does not mount downloads by default; enabling cleanup
-without adding this shared mount will only log a missing-directory warning.
+The included Compose file mounts download and staging volumes read-only in tarr.
+Directory cleanup requires a writable mount for its cleanup roots, as in the example
+above; otherwise pruning attempts log permission errors.
 
 ## Logging
 
@@ -337,6 +410,13 @@ uv run ruff format --check .
 uv run ty check
 ```
 
+The opt-in `tests/test_content_deletion_e2e.py` test runs with `TARR_RUN_E2E=1`.
+It requires Docker, builds a temporary tarr image, and uses qBittorrent v5.2.3 plus
+isolated volumes/network to verify hard links, multi-file removal, zero-data removal,
+and stopping incomplete staging downloads with tarr's storage mounted read-only. It
+removes its containers, volumes, network, and image afterward; production is never
+contacted.
+
 After changing configuration models, regenerate the checked-in editor schema:
 
 ```nu
@@ -349,8 +429,8 @@ synchronization, documentation coverage, field examples, and both generated star
 against the schema and startup validation.
 
 Source lives in [`tarr/`](tarr/), with configuration models in `config.py`, job
-orchestration in `main.py`, filesystem cleanup in `cleanup.py`, and structured
-logging in `logging.py`. Tests live in
+orchestration in `main.py`, shared content verification in `deletion.py`, path mapping
+in `storage.py`, filesystem cleanup in `cleanup.py`, and structured logging in `logging.py`. Tests live in
 [`tests/`](tests/). Releases are packaged from `pyproject.toml` and the container
 build is defined in [`Dockerfile`](Dockerfile).
 

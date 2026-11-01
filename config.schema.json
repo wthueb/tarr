@@ -110,6 +110,53 @@
       "title": "CleanupEmptyDirsConfig",
       "type": "object"
     },
+    "ContentDeletionConfig": {
+      "additionalProperties": false,
+      "description": "Verify one outstanding content deletion across all removal jobs, in memory only.\n\nMount download/staging storage read-only. Timeout retains the pending guard across\ndaemon passes, but restarting tarr loses it. Unlink completion is trusted without\nrequiring an expected byte increase; open handles can delay actual space recovery.\nqBittorrent's autonomous actions and other processes are outside this guard.",
+      "properties": {
+        "path_mappings": {
+          "description": "Download and staging roots visible to tarr. Use absolute non-root paths or 'qBittorrent-path:tarr-path'; the most-specific source wins. Conflicting sources and '..' are forbidden. Required when any enabled job deletes content. Symlink paths and inaccessible mounts are skipped. Confirmation tracks files that exist before deletion without requiring a particular content layout.",
+          "examples": [
+            [
+              "/downloads",
+              "/incomplete"
+            ],
+            [
+              "/downloads:/data/downloads"
+            ]
+          ],
+          "items": {
+            "type": "string"
+          },
+          "title": "Path Mappings",
+          "type": "array"
+        },
+        "poll_interval_seconds": {
+          "default": 2,
+          "description": "Seconds between stop/deletion confirmation checks; must be positive.",
+          "examples": [
+            2,
+            5
+          ],
+          "minimum": 1,
+          "title": "Poll Interval Seconds",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "default": 300,
+          "description": "Maximum seconds waiting per operation, at least poll_interval_seconds. An unconfirmed deletion blocks all further content deletion until confirmed, including later daemon passes. A one-shot run exits nonzero if unresolved.",
+          "examples": [
+            300,
+            600
+          ],
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "ContentDeletionConfig",
+      "type": "object"
+    },
     "LoggingConfig": {
       "additionalProperties": false,
       "description": "Structured logs always go to stdout; optionally also write rotating files.",
@@ -188,15 +235,19 @@
             "properties": {
               "free_space_threshold_gibi": {
                 "type": "integer"
+              },
+              "free_space_path": {
+                "type": "string"
               }
             },
             "required": [
-              "free_space_threshold_gibi"
+              "free_space_threshold_gibi",
+              "free_space_path"
             ]
           }
         }
       ],
-      "description": "Delete eligible torrents with content until qBittorrent reports enough free space.\n\nEvery matched tracker must pass its required seed-time OR ratio policy; no match\nmeans no removal. Highest effective delete_priority goes first (the minimum\nacross matched trackers), then most swarm seeders. Desired limits and category\noverrides do not govern eligibility. Space is re-read after each removal so\nhard links are not assumed to reclaim space. Dry runs estimate from sizes.\nArr verification failures skip a candidate and continue to other torrents.",
+      "description": "Delete eligible torrents with content until the target filesystem has enough free space.\n\nEvery matched tracker must pass its required seed-time OR ratio policy; no match\nmeans no removal. Highest effective delete_priority goes first (the minimum\nacross matched trackers), then most swarm seeders. Desired limits and category\noverrides do not govern eligibility. Content deletion is serialized and verified\non read-only local mounts. Free space is measured directly on the target filesystem;\nhard links are not assumed to reclaim space. Dry runs estimate from sizes.\nArr verification failures skip a candidate and continue to other torrents.",
       "properties": {
         "enabled": {
           "default": false,
@@ -282,12 +333,30 @@
             }
           ],
           "default": null,
-          "description": "Target free space in GiB (1 GiB = 1024^3 bytes), measured by qBittorrent. Required and non-null when enabled. Below this threshold, remove eligible torrents until the target is met or no eligible candidates remain.",
+          "description": "Target free space in GiB (1 GiB = 1024^3 bytes), measured on free_space_path. Required and non-null when enabled. Below this threshold, remove eligible torrents until the target is met or no eligible candidates remain.",
           "examples": [
             1024,
             100
           ],
           "title": "Free Space Threshold Gibi"
+        },
+        "free_space_path": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Target filesystem directory in qBittorrent's namespace. Required when enabled and covered by content_deletion.path_mappings. tarr measures locally available bytes here and only deletes content on this filesystem. Must be absolute, non-root, without '..'. Read-only local mounts are sufficient.",
+          "examples": [
+            "/downloads",
+            null
+          ],
+          "title": "Free Space Path"
         }
       },
       "title": "MaintainFreeSpaceConfig",
@@ -799,6 +868,86 @@
     }
   },
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "anyOf": [
+          {
+            "properties": {
+              "remove_unregistered": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              }
+            },
+            "required": [
+              "remove_unregistered"
+            ]
+          },
+          {
+            "properties": {
+              "maintain_free_space": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              }
+            },
+            "required": [
+              "maintain_free_space"
+            ]
+          },
+          {
+            "properties": {
+              "remove_stopped": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  },
+                  "on_delete": {
+                    "const": "RemoveWithContent"
+                  }
+                },
+                "required": [
+                  "enabled",
+                  "on_delete"
+                ]
+              }
+            },
+            "required": [
+              "remove_stopped"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "content_deletion": {
+            "properties": {
+              "path_mappings": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "path_mappings"
+            ]
+          }
+        },
+        "required": [
+          "content_deletion"
+        ]
+      }
+    }
+  ],
   "description": "tarr configuration. Only qbittorrent and a nonempty trackers list are required.\n\nAll jobs are disabled by default. Start with --dry-run before enabling removal\nor share-limit changes. Run once, or poll with --daemon. Job order is\nremove_unregistered, set_seed_limits, remove_stopped, maintain_free_space,\ncleanup_empty_dirs. Jobs and interval_seconds belong at the root, never under\nqbittorrent. Unknown keys and invalid policies stop startup, even for disabled\njobs. The schema validates structure; startup also checks path safety, known\nArr references, category uniqueness, and comparisons between retention limits.",
   "properties": {
     "qbittorrent": {
@@ -809,6 +958,18 @@
           "host": "http://localhost:8080",
           "password": "replace-me",
           "username": "admin"
+        }
+      ]
+    },
+    "content_deletion": {
+      "$ref": "#/$defs/ContentDeletionConfig",
+      "description": "Shared read-only filesystem verification and serialized content deletion. Configure mappings before enabling a job that deletes files. Pending state is memory-only and is lost on restart.",
+      "examples": [
+        {
+          "path_mappings": [
+            "/downloads",
+            "/incomplete"
+          ]
         }
       ]
     },
@@ -865,6 +1026,7 @@
             "autobrr"
           ],
           "enabled": true,
+          "free_space_path": "/downloads",
           "free_space_threshold_gibi": 1024
         }
       ]
@@ -1002,6 +1164,12 @@
         "password": "replace-me",
         "username": "admin"
       },
+      "content_deletion": {
+        "path_mappings": [
+          "/downloads",
+          "/incomplete"
+        ]
+      },
       "interval_seconds": 60,
       "remove_unregistered": {
         "delay_minutes": 15,
@@ -1029,6 +1197,7 @@
           "autobrr"
         ],
         "enabled": true,
+        "free_space_path": "/downloads",
         "free_space_threshold_gibi": 1024
       },
       "set_seed_limits": {
