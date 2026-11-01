@@ -18,6 +18,7 @@ from tarr.config import (
     UNLIMITED,
     ArrConfig,
     Config,
+    ContentDeletionConfig,
     QBittorrentConfig,
     RemovalCategory,
     RemoveUnregisteredConfig,
@@ -26,6 +27,7 @@ from tarr.config import (
     load_config,
     removal_category_name,
 )
+from tarr.deletion import ContentDeletionCoordinator
 from tarr.logging import setup_logging
 from tarr.seed_limits import desired_limits, limits_met, matched_trackers, required_limits_met
 
@@ -97,15 +99,37 @@ def warn_category_overlaps(config: Config) -> None:
             log.warning("categories overlap with ignore_categories")
 
 
+def _tracker_is_unregistered(tracker: Any) -> bool:
+    # https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-5.0)#get-torrent-trackers
+    if tracker.status in {0, 1, 3}:
+        return False
+
+    msg = tracker.msg.lower()
+
+    return any(
+        message in msg
+        for message in (
+            "unregistered torrent",
+            "torrent does not exist on this tracker",
+            "torrent has been deleted",
+            "torrent not registered",
+        )
+    )
+
+
 def remove_unregistered(
     client: qbittorrentapi.Client,
     cfg: RemoveUnregisteredConfig,
     unregistered_first_seen: dict[str, datetime.datetime],
     dry_run: bool = False,
     arrs: dict[str, ArrConfig] | None = None,
+    deletion_coordinator: ContentDeletionCoordinator | None = None,
 ) -> None:
     log.info("checking for unregistered torrents...")
 
+    coordinator = deletion_coordinator or ContentDeletionCoordinator(
+        client, ContentDeletionConfig()
+    )
     torrents = torrents_in_categories(client, cfg.categories, cfg.ignore_categories)
     now = datetime.datetime.now()
 
@@ -120,18 +144,7 @@ def remove_unregistered(
             trackers = torrent.trackers
 
             for tracker in trackers:
-                # https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-(qBittorrent-5.0)#get-torrent-trackers
-                if tracker.status in [0, 1, 3]:
-                    continue
-
-                msg = tracker.msg.lower()
-
-                if (
-                    "unregistered torrent" in msg
-                    or "torrent does not exist on this tracker" in msg
-                    or "torrent has been deleted" in msg
-                    or "torrent not registered" in msg
-                ):
+                if _tracker_is_unregistered(tracker):
                     log.debug(
                         "tracker reported unregistered torrent",
                         tracker_msg=tracker.msg,
@@ -150,18 +163,37 @@ def remove_unregistered(
                     time_unregistered = now - first_seen
 
                     if time_unregistered >= delay:
-                        if not removal_allowed(
-                            torrent.hash, cfg.arr_instances(torrent.category), arrs or {}
-                        ):
-                            break
+
+                        def allowed(current: Any, *, verify_tracker: bool = True) -> bool:
+                            return (
+                                cfg.includes_category(current.category)
+                                and (
+                                    not verify_tracker
+                                    or any(
+                                        _tracker_is_unregistered(tracker)
+                                        for tracker in current.trackers
+                                    )
+                                )
+                                and removal_allowed(
+                                    current.hash, cfg.arr_instances(current.category), arrs or {}
+                                )
+                            )
+
                         with bound_contextvars(
                             dry_run=dry_run,
                             delete_files=True,
                             unregistered_for_seconds=time_unregistered.total_seconds(),
                         ):
                             log.info("unregistered torrent eligible for removal")
-                            if not dry_run:
-                                torrent.delete(delete_files=True)
+                            removed = coordinator.delete(
+                                torrent,
+                                allowed,
+                                dry_run=dry_run,
+                                allowed_after_stop=lambda current: allowed(
+                                    current, verify_tracker=False
+                                ),
+                            )
+                            if removed and not dry_run:
                                 unregistered_first_seen.pop(torrent.hash, None)
                     else:
                         remaining = delay - time_unregistered
@@ -184,9 +216,13 @@ def remove_stopped(
     config: Config,
     stopped_first_seen: dict[str, datetime.datetime],
     dry_run: bool = False,
+    deletion_coordinator: ContentDeletionCoordinator | None = None,
 ) -> None:
     log.info("checking for stopped torrents...")
     cfg = config.remove_stopped
+    coordinator = deletion_coordinator or ContentDeletionCoordinator(
+        client, config.content_deletion
+    )
 
     completed_torrents = torrents_in_categories(
         client,
@@ -242,8 +278,21 @@ def remove_stopped(
                     log.debug("torrent does not meet removal criteria")
                     continue
 
-            if not removal_allowed(torrent.hash, cfg.arr_instances(torrent.category), config.arrs):
-                continue
+            def allowed(current: Any) -> bool:
+                return (
+                    cfg.includes_category(current.category)
+                    and current.state in STOPPED_COMPLETED_STATES
+                    and required_limits_met(current, matched_trackers(config, current))
+                    and limits_met(
+                        current.seeding_time,
+                        current.ratio,
+                        current.max_seeding_time,
+                        current.max_ratio,
+                    )
+                    and removal_allowed(
+                        current.hash, cfg.arr_instances(current.category), config.arrs
+                    )
+                )
 
             delete_files = cfg.on_delete == "RemoveWithContent"
             with bound_contextvars(
@@ -254,8 +303,13 @@ def remove_stopped(
             ):
                 log.info("stopped torrent eligible for removal")
 
-                if not dry_run:
-                    torrent.delete(delete_files=delete_files)
+                if delete_files:
+                    removed = coordinator.delete(torrent, allowed, dry_run=dry_run)
+                else:
+                    removed = allowed(torrent)
+                    if removed and not dry_run:
+                        torrent.delete(delete_files=False)
+                if removed and not dry_run:
                     stopped_first_seen.pop(torrent.hash, None)
 
     stale_hashes = set(stopped_first_seen) - currently_stopped
@@ -349,67 +403,84 @@ def maintain_free_space(
     client: qbittorrentapi.Client,
     config: Config,
     dry_run: bool = False,
+    deletion_coordinator: ContentDeletionCoordinator | None = None,
 ) -> None:
     log.info("maintaining free space...")
-
     cfg = config.maintain_free_space
-    torrents = torrents_in_categories(client, cfg.categories, cfg.ignore_categories)
-    free_space = client.sync_maindata().server_state.free_space_on_disk
-    threshold = cfg.free_space_threshold_bytes
-
-    if free_space >= threshold:
-        with bound_contextvars(free_space_bytes=free_space, threshold_bytes=threshold):
-            log.info("free space above threshold; nothing to do")
+    coordinator = deletion_coordinator or ContentDeletionCoordinator(
+        client, config.content_deletion
+    )
+    if coordinator.unresolved:
+        log.warning("free-space cleanup blocked by unconfirmed content deletion")
         return
+    path = cfg.free_space_path
+    if path is None:
+        raise ValueError("configure maintain_free_space.free_space_path before cleanup")
+    threshold = cfg.free_space_threshold_bytes
+    free_space = coordinator.free_space(path)
+    attempted: set[str] = set()
 
-    possible_to_remove: list[tuple[qbittorrentapi.TorrentDictionary, list[TrackerConfig], int]] = []
+    def allowed(current: Any) -> bool:
+        return (
+            cfg.includes_category(current.category)
+            and required_limits_met(current, matched_trackers(config, current))
+            and removal_allowed(current.hash, cfg.arr_instances(current.category), config.arrs)
+        )
 
-    for torrent in torrents:
-        with bound_contextvars(**_torrent_context(torrent)):
-            trackers = matched_trackers(config, torrent)
-            if not trackers:
+    while free_space < threshold:
+        candidates: list[tuple[qbittorrentapi.TorrentDictionary, list[TrackerConfig], int]] = []
+        for torrent in torrents_in_categories(client, cfg.categories, cfg.ignore_categories):
+            if torrent.hash in attempted:
                 continue
-            delete_priority = min(tracker.delete_priority for tracker in trackers)
-            with bound_contextvars(
-                trackers=[tracker.name for tracker in trackers],
-                delete_priority=delete_priority,
-            ):
-                log.debug("checking torrent removal eligibility")
-                if not required_limits_met(torrent, trackers):
-                    continue
-            possible_to_remove.append((torrent, trackers, delete_priority))
-
-    possible_to_remove.sort(key=lambda item: (item[2], item[0].num_complete), reverse=True)
-
-    with bound_contextvars(eligible_torrent_count=len(possible_to_remove)):
-        log.debug("identified torrents meeting removal criteria")
-
-    while possible_to_remove and free_space < threshold:
-        torrent, trackers, delete_priority = possible_to_remove.pop(0)
-
-        with bound_contextvars(**_torrent_context(torrent)):
-            if not removal_allowed(torrent.hash, cfg.arr_instances(torrent.category), config.arrs):
+            with bound_contextvars(**_torrent_context(torrent)):
+                trackers = matched_trackers(config, torrent)
+                if trackers and required_limits_met(torrent, trackers):
+                    candidates.append(
+                        (torrent, trackers, min(tracker.delete_priority for tracker in trackers))
+                    )
+        candidates.sort(key=lambda item: (item[2], item[0].num_complete), reverse=True)
+        if not candidates:
+            break
+        torrent, trackers, priority = candidates[0]
+        attempted.add(torrent.hash)
+        if not dry_run:
+            free_space = coordinator.free_space(path)
+            if free_space >= threshold:
+                break
+        with bound_contextvars(
+            **_torrent_context(torrent),
+            dry_run=dry_run,
+            delete_files=True,
+            trackers=[tracker.name for tracker in trackers],
+            delete_priority=priority,
+            torrent_ratio=torrent.ratio,
+            uploaded_bytes=torrent.uploaded,
+            seeding_time_seconds=torrent.seeding_time,
+            torrent_seeders=torrent.num_complete,
+        ):
+            if not allowed(torrent):
                 continue
-
-            with bound_contextvars(
+            log.info("torrent selected to reclaim free space")
+            removed = coordinator.delete(
+                torrent,
+                allowed,
                 dry_run=dry_run,
-                delete_files=True,
-                trackers=[tracker.name for tracker in trackers],
-                delete_priority=delete_priority,
-                torrent_ratio=torrent.ratio,
-                uploaded_bytes=torrent.uploaded,
-                seeding_time_seconds=torrent.seeding_time,
-                torrent_seeders=torrent.num_complete,
-            ):
-                log.info("torrent selected to reclaim free space")
-
-                if not dry_run:
-                    torrent.delete(delete_files=True)
-
-            if dry_run:
+                free_space_path=path,
+                threshold=threshold,
+            )
+        if coordinator.unresolved:
+            break
+        if dry_run:
+            if removed:
                 free_space += torrent.size
-            else:
-                free_space = client.sync_maindata().server_state.free_space_on_disk
+        else:
+            free_space = coordinator.free_space(path)
+    log.info(
+        "free-space cleanup finished",
+        free_space_bytes=free_space,
+        threshold_bytes=threshold,
+        estimated=dry_run,
+    )
 
 
 def run(
@@ -418,8 +489,13 @@ def run(
     unregistered_first_seen: dict[str, datetime.datetime],
     dry_run: bool = False,
     stopped_first_seen: dict[str, datetime.datetime] | None = None,
+    deletion_coordinator: ContentDeletionCoordinator | None = None,
 ) -> None:
     log.info("starting run...")
+    coordinator = deletion_coordinator or ContentDeletionCoordinator(
+        client, config.content_deletion
+    )
+    coordinator.begin_pass(dry_run=dry_run)
 
     if stopped_first_seen is None:
         stopped_first_seen = {}
@@ -432,6 +508,7 @@ def run(
                 unregistered_first_seen,
                 dry_run,
                 arrs=config.arrs,
+                deletion_coordinator=coordinator,
             )
 
     if config.set_seed_limits.enabled:
@@ -440,11 +517,11 @@ def run(
 
     if config.remove_stopped.enabled:
         with bound_contextvars(job="remove_stopped"):
-            remove_stopped(client, config, stopped_first_seen, dry_run)
+            remove_stopped(client, config, stopped_first_seen, dry_run, coordinator)
 
     if config.maintain_free_space.enabled:
         with bound_contextvars(job="maintain_free_space"):
-            maintain_free_space(client, config, dry_run)
+            maintain_free_space(client, config, dry_run, coordinator)
 
     if config.cleanup_empty_dirs.enabled:
         with bound_contextvars(job="cleanup_empty_dirs"):
@@ -491,6 +568,8 @@ def main():
 
     unregistered_first_seen: dict[str, datetime.datetime] = {}
     stopped_first_seen: dict[str, datetime.datetime] = {}
+    coordinator = ContentDeletionCoordinator(client, config.content_deletion)
+    log.warning("pending content deletion state is memory-only; restart clears the guard")
 
     if not args.daemon:
         run(
@@ -499,7 +578,10 @@ def main():
             unregistered_first_seen,
             dry_run=args.dry_run,
             stopped_first_seen=stopped_first_seen,
+            deletion_coordinator=coordinator,
         )
+        if coordinator.pending is not None:
+            raise SystemExit("content deletion remains unconfirmed")
         return
 
     with bound_contextvars(interval_seconds=config.interval_seconds):
@@ -513,6 +595,7 @@ def main():
                 unregistered_first_seen,
                 dry_run=args.dry_run,
                 stopped_first_seen=stopped_first_seen,
+                deletion_coordinator=coordinator,
             )
         except Exception:
             log.exception("run failed")

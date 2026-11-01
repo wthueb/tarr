@@ -15,6 +15,8 @@ from tarr.config import Config
 from tarr.main import maintain_free_space, remove_stopped, remove_unregistered, set_seed_limits
 from tarr.seed_limits import limits_met, required_limits_met
 
+pytestmark = pytest.mark.usefixtures("policy_deletion")
+
 GIB = 1024**3
 
 
@@ -33,7 +35,12 @@ def raw_config(*trackers):
         "qbittorrent": {"host": "localhost", "username": "user", "password": "secret-password"},
         "trackers": list(trackers) or [tracker()],
         "remove_stopped": {"enabled": True, "on_delete": "RemoveWithContent"},
-        "maintain_free_space": {"enabled": True, "free_space_threshold_gibi": 4},
+        "content_deletion": {"path_mappings": ["/downloads"]},
+        "maintain_free_space": {
+            "enabled": True,
+            "free_space_threshold_gibi": 4,
+            "free_space_path": "/downloads",
+        },
     }
 
 

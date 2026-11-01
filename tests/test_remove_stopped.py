@@ -11,6 +11,8 @@ from structlog.contextvars import get_contextvars
 from tarr.config import Config, RemoveStoppedConfig, SetSeedLimitsCategoryConfig
 from tarr.main import remove_stopped, run
 
+pytestmark = pytest.mark.usefixtures("policy_deletion")
+
 
 class FakeClient:
     def __init__(self, torrents):
@@ -34,6 +36,7 @@ def make_run_config(*, seed_time_minutes=1, ratio=1, **remove_stopped):
                 "username": "user",
                 "password": "pass",
             },
+            "content_deletion": {"path_mappings": ["/downloads"]},
             "remove_stopped": remove_stopped,
             "trackers": [
                 {

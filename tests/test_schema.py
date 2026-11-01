@@ -132,6 +132,29 @@ def test_schema_checks_enabled_job_requirements(validator, raw_config, job, enab
         validator.validate(raw_config)
 
 
+@pytest.mark.parametrize("job", ["remove_unregistered", "remove_stopped", "maintain_free_space"])
+@pytest.mark.parametrize("storage", [None, {}, {"path_mappings": []}])
+def test_schema_requires_storage_for_enabled_content_jobs(validator, raw_config, job, storage):
+    for name in ("remove_unregistered", "remove_stopped", "maintain_free_space"):
+        raw_config[name]["enabled"] = name == job
+    if storage is None:
+        raw_config.pop("content_deletion")
+    else:
+        raw_config["content_deletion"] = storage
+    with pytest.raises(ValidationError):
+        validator.validate(raw_config)
+
+
+@pytest.mark.parametrize("path", [None, "missing"])
+def test_schema_requires_free_space_path(validator, raw_config, path):
+    if path == "missing":
+        raw_config["maintain_free_space"].pop("free_space_path")
+    else:
+        raw_config["maintain_free_space"]["free_space_path"] = path
+    with pytest.raises(ValidationError):
+        validator.validate(raw_config)
+
+
 def test_schema_requires_category_action(validator, raw_config):
     del raw_config["set_seed_limits"]["categories"][0]["action"]
 
