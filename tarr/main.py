@@ -130,6 +130,7 @@ def remove_unregistered(
                     "unregistered torrent" in msg
                     or "torrent does not exist on this tracker" in msg
                     or "torrent has been deleted" in msg
+                    or "torrent not registered" in msg
                 ):
                     log.debug(
                         "tracker reported unregistered torrent",
