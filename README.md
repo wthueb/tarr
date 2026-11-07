@@ -410,12 +410,53 @@ uv run ruff format --check .
 uv run ty check
 ```
 
-The opt-in `tests/test_content_deletion_e2e.py` test runs with `TARR_RUN_E2E=1`.
-It requires Docker, builds a temporary tarr image, and uses qBittorrent v5.2.3 plus
-isolated volumes/network to verify hard links, multi-file removal, zero-data removal,
-and stopping incomplete staging downloads with tarr's storage mounted read-only. It
-removes its containers, volumes, network, and image afterward; production is never
-contacted.
+### End-to-end tests
+
+The E2E suite requires only Docker with Compose, not a local Python environment.
+From the repository root:
+
+```nu
+docker compose -f compose.e2e.yaml run --build --rm --use-aliases tests
+```
+
+Compose builds the Dockerfile's `test` target, seeds disposable volumes, waits
+for qBittorrent v5.2.3 to be healthy, and runs pytest against `e2e/` as the normal
+non-root application user. The test image extends the same runtime as production,
+adding only the locked `test` dependency group and E2E suite. The default
+`production` target contains neither pytest nor test code.
+
+Compose manages the services; pytest fixtures manage the client, tracker, and
+per-test torrent cleanup. There is no runtime dependency installation, Docker
+socket mount, source bind mount, or host port exposure. The suite covers the CLI,
+read-only storage, hard links, multi-file and nested torrents, partial downloads,
+and zero-data removal against a local fake tracker. The network is internal;
+production is never contacted. `uv run pytest` runs only the unit tests and does
+not need Docker.
+
+The command returns the test runner's exit code. After each run, including a
+failed or interrupted run, remove the isolated containers, network, and volumes:
+
+```nu
+docker compose -f compose.e2e.yaml down --volumes --remove-orphans
+```
+
+The `tarr-e2e` Compose project is separate from the production `compose.yaml`.
+Images are retained for reuse. To test an already-built image without rebuilding:
+
+```nu
+$env.TARR_E2E_IMAGE = "tarr:test"
+docker compose -f compose.e2e.yaml run --rm --use-aliases tests
+```
+
+Use `docker compose -f compose.e2e.yaml logs` for service logs. To run concurrent
+suites, add the same `--project-name <unique-name>` to both the run and cleanup
+commands so they use separate resources.
+
+GitHub Actions runs the same Compose suite on every pull request, push to `master`,
+and manual CI run. It builds and loads the `test` target with BuildKit caching,
+then runs Compose without rebuilding or installing Python on the runner. It does
+not publish or transfer test images between jobs. Cleanup always runs, Docker
+diagnostics are uploaded on failure, and a failed E2E run blocks image publication.
 
 After changing configuration models, regenerate the checked-in editor schema:
 

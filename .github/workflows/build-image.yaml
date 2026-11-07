@@ -15,9 +15,6 @@ on:
       publish:
         required: true
         type: boolean
-      export_e2e:
-        required: true
-        type: boolean
     secrets:
       DOCKERHUB_TOKEN:
         required: false
@@ -79,6 +76,7 @@ jobs:
         with:
           context: .
           file: Dockerfile
+          target: production
           platforms: ${{ inputs.platform }}
           tags: |
             wthueb/tarr
@@ -108,36 +106,13 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Build e2e image artifact
-        if: ${{ !inputs.publish && inputs.export_e2e }}
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile
-          platforms: ${{ inputs.platform }}
-          tags: tarr:e2e
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          outputs: type=docker,dest=${{ runner.temp }}/tarr.tar
-          cache-from: type=gha,scope=tarr-${{ inputs.platform_key }}
-          cache-to: type=gha,mode=max,ignore-error=true,scope=tarr-${{ inputs.platform_key }}
-
-      - name: Upload e2e image
-        if: ${{ !inputs.publish && inputs.export_e2e }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: e2e-tarr-${{ inputs.platform_key }}-image
-          path: ${{ runner.temp }}/tarr.tar
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-
       - name: Validate image build
-        if: ${{ !inputs.publish && !inputs.export_e2e }}
+        if: ${{ !inputs.publish }}
         uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
+          target: production
           platforms: ${{ inputs.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}

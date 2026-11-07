@@ -57,7 +57,7 @@ jobs:
               && context.actor !== "dependabot[bot]";
 
             let run = true;
-            if (isBranchPush) {
+            if (isBranchPush && context.ref !== "refs/heads/master") {
               const branch = context.ref.slice("refs/heads/".length);
               const pulls = await github.paginate(
                 github.rest.pulls.list,
@@ -126,7 +126,6 @@ jobs:
       platform_key: amd64
       runner: ubuntu-24.04
       publish: ${{ needs.route.outputs.publish == 'true' }}
-      export_e2e: true
     secrets:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -145,7 +144,6 @@ jobs:
       platform_key: arm64
       runner: ubuntu-24.04-arm
       publish: ${{ needs.route.outputs.publish == 'true' }}
-      export_e2e: false
     secrets:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -154,60 +152,64 @@ jobs:
     if: >-
       ${{
         needs.route.outputs.run == 'true' &&
-        (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
+        (github.event_name == 'pull_request' ||
+         github.event_name == 'workflow_dispatch' ||
+         (github.event_name == 'push' && github.ref == 'refs/heads/master'))
       }}
     needs:
       - route
       - python
-      - build_amd64_image
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
-      actions: read
       contents: read
-      packages: read
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
 
     steps:
-      - name: Log in to GitHub Container Registry
-        if: needs.route.outputs.publish == 'true'
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout
+        uses: actions/checkout@v7
 
-      - name: Download image digest
-        if: needs.route.outputs.publish == 'true'
-        uses: actions/download-artifact@v8
-        with:
-          name: tarr-amd64-digest
-          path: ${{ runner.temp }}/digests/tarr
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
-      - name: Load image from registry digest
-        if: needs.route.outputs.publish == 'true'
+      - name: Build test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: test
+          tags: tarr:test
+          load: true
+          cache-from: |
+            type=gha,scope=tarr-test-amd64
+            type=gha,scope=tarr-amd64
+          cache-to: type=gha,mode=max,ignore-error=true,scope=tarr-test-amd64
+
+      - name: Run end-to-end tests
         shell: bash
         run: |
-          set -euo pipefail
-          image_digest="sha256:$(basename "$(find "${RUNNER_TEMP}/digests/tarr" -type f -print -quit)")"
+          mkdir -p e2e-artifacts
+          docker compose -f compose.e2e.yaml run --rm --use-aliases tests 2>&1 | tee e2e-artifacts/tests.log
 
-          docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/tarr@${image_digest}"
-          docker tag \
-            "ghcr.io/${GITHUB_REPOSITORY_OWNER}/tarr@${image_digest}" \
-            tarr:e2e
+      - name: Collect Docker diagnostics
+        if: always()
+        run: |
+          mkdir -p e2e-artifacts
+          docker compose -f compose.e2e.yaml ps --all > e2e-artifacts/services.txt
+          docker compose -f compose.e2e.yaml logs --no-color > e2e-artifacts/compose.log 2>&1
 
-      - name: Download image
-        if: needs.route.outputs.publish != 'true'
-        uses: actions/download-artifact@v8
+      - name: Upload Docker diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
         with:
-          name: e2e-tarr-amd64-image
-          path: ${{ runner.temp }}/images
+          name: e2e-diagnostics
+          path: e2e-artifacts/
+          retention-days: 7
 
-      - name: Load image artifact
-        if: needs.route.outputs.publish != 'true'
-        shell: bash
-        run: docker load --input "${RUNNER_TEMP}/images/tarr.tar"
-
-      - name: Test image
-        run: docker run --rm tarr:e2e tarr --help
+      - name: Clean up end-to-end environment
+        if: always()
+        run: docker compose -f compose.e2e.yaml down --volumes --remove-orphans
 
   publish:
     name: Publish tarr
