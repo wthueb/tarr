@@ -13,7 +13,11 @@ config.example.yaml
 .venv/
 .vscode/
 Dockerfile
-compose.yaml
+compose*.yaml
+e2e-artifacts/
+tests/
+.pytest_cache/
+**/__pycache__/
 flake.lock
 flake.nix
 

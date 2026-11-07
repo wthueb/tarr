@@ -19,6 +19,9 @@ Homepage = "https://github.com/wthueb/tarr"
 [project.scripts]
 tarr = "tarr:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 
@@ -30,9 +33,10 @@ requires = ["hatchling", "uv-dynamic-versioning"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
+test = ["pytest>=9.1.1"]
 dev = [
+    { include-group = "test" },
     "jsonschema>=4.26",
-    "pytest>=9.1.1",
     "ruff>=0.16.0",
     "ty>=0.0.65",
 ]
