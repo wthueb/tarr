@@ -244,7 +244,7 @@ class ContentDeletionCoordinator:
         stopped the torrent. The initial allowed check always runs before stopping.
         """
         if self.unresolved:
-            log.warning("content deletion blocked by unconfirmed operation")
+            log.warning("content deletion blocked by unconfirmed operation", torrent=torrent.hash)
             return False
         stopped = False
         requested = False
@@ -263,7 +263,7 @@ class ContentDeletionCoordinator:
                     return False
             paths = self._snapshot(torrent, target_device)
             if dry_run:
-                log.info("would verify content deletion", estimated=True)
+                log.info("would verify content deletion", torrent=torrent_hash, estimated=True)
                 return True
             if torrent.progress < 1 and torrent.state not in STOPPED_STATES:
                 forced = bool(getattr(torrent, "force_start", False))
@@ -294,14 +294,22 @@ class ContentDeletionCoordinator:
                 raise ValueError("torrent storage changed before deletion")
             final_allowed = allowed_after_stop if stopped and allowed_after_stop else allowed
             if not final_allowed(current):
-                log.info("torrent no longer eligible for content deletion", stopped_by_tarr=stopped)
+                log.info(
+                    "torrent no longer eligible for content deletion",
+                    torrent=torrent_hash,
+                    stopped_by_tarr=stopped,
+                )
                 return False
             if free_space_path is not None and threshold is not None:
                 if self.free_space(free_space_path) >= threshold:
                     return False
             requested = True
             self.pending = PendingDeletion(torrent_hash, paths, time.monotonic())
-            log.info("requesting serialized content deletion", tracked_file_count=len(paths))
+            log.info(
+                "requesting serialized content deletion",
+                torrent=torrent_hash,
+                tracked_file_count=len(paths),
+            )
             self.client.torrents_delete(torrent_hashes=torrent_hash, delete_files=True)
             return self._confirm()
         except Exception as error:
@@ -331,7 +339,11 @@ class ContentDeletionCoordinator:
         try:
             confirmed = self._wait(complete)
         except Exception as error:
-            log.warning("content deletion confirmation failed", error=str(error))
+            log.warning(
+                "content deletion confirmation failed",
+                torrent=pending.torrent_hash,
+                error=str(error),
+            )
             confirmed = False
         if not confirmed:
             self.blocked = True

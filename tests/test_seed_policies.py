@@ -8,12 +8,12 @@ import pytest
 import qbittorrentapi
 import yaml
 from pydantic import ValidationError
-from structlog.contextvars import merge_contextvars
+from structlog.contextvars import get_contextvars, merge_contextvars
 from structlog.testing import capture_logs
 
 from tarr.config import Config
-from tarr.main import maintain_free_space, remove_stopped, remove_unregistered, set_seed_limits
-from tarr.seed_limits import limits_met, required_limits_met
+from tarr.main import maintain_free_space, remove_stopped, remove_unregistered, run, set_seed_limits
+from tarr.seed_limits import limits_met, matched_trackers, required_limits_met
 
 pytestmark = pytest.mark.usefixtures("policy_deletion")
 
@@ -208,6 +208,65 @@ def test_startup_fails_before_connection_without_exposing_credentials(
     assert "secret-password" not in str(error.value)
     build.assert_not_called()
     run.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["unmatched", "tracker_error", "required_unmet"])
+def test_policy_helper_logs_include_info_hash_without_ambient_context(failure):
+    config = Config.model_validate(raw_config())
+    candidate = torrent("0123456789abcdef0123456789abcdef01234567", seeding_time=0, ratio=0)
+    candidate.name = "display name, not the info hash"
+    if failure == "unmatched":
+        candidate.trackers = []
+    elif failure == "tracker_error":
+        del candidate.trackers
+
+    with capture_logs() as logs:
+        if failure == "required_unmet":
+            assert not required_limits_met(candidate, config.trackers)
+        else:
+            assert matched_trackers(config, candidate) == []
+
+    assert len(logs) == 1
+    assert logs[0]["torrent"] == candidate.hash
+
+
+@pytest.mark.parametrize(
+    "job", ["remove_unregistered", "remove_stopped", "set_seed_limits", "maintain_free_space"]
+)
+def test_all_torrent_job_logs_include_info_hash_and_restore_context(job):
+    raw = raw_config()
+    raw["remove_stopped"]["enabled"] = False
+    raw["maintain_free_space"]["enabled"] = False
+    raw[job] = {"enabled": True}
+    if job == "maintain_free_space":
+        raw[job]["free_space_threshold_gibi"] = 4
+        raw[job]["free_space_path"] = "/downloads"
+    elif job == "set_seed_limits":
+        raw[job]["categories"] = [{"name": "cross", "action": "Stop"}]
+    config = Config.model_validate(raw)
+    candidates = [torrent(str(index) * 40) for index in (1, 2)]
+    for candidate in candidates:
+        candidate.name = f"display name for {candidate.hash}"
+        candidate.trackers[0].msg = "unregistered torrent"
+    summaries = {
+        "starting run...",
+        "checking for unregistered torrents...",
+        "checking for stopped torrents...",
+        "setting seed limits...",
+        "maintaining free space...",
+        "free-space cleanup finished",
+    }
+
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        run(cast(qbittorrentapi.Client, FakeClient(candidates)), config, {}, dry_run=True)
+
+    torrent_logs = [event for event in logs if event["event"] not in summaries]
+    assert torrent_logs
+    assert {event["torrent"] for event in torrent_logs} == {t.hash for t in candidates}
+    names_by_hash = {t.hash: t.name for t in candidates}
+    assert all(event["torrent_name"] == names_by_hash[event["torrent"]] for event in torrent_logs)
+    assert all("torrent" not in event for event in logs if event["event"] in summaries)
+    assert get_contextvars() == {}
 
 
 def test_matching_is_case_insensitive_deduplicated_and_covers_subdomains():

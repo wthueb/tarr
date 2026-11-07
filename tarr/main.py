@@ -411,7 +411,10 @@ def maintain_free_space(
         client, config.content_deletion
     )
     if coordinator.unresolved:
-        log.warning("free-space cleanup blocked by unconfirmed content deletion")
+        log.warning(
+            "free-space cleanup blocked by unconfirmed content deletion",
+            torrent=coordinator.pending.torrent_hash if coordinator.pending is not None else None,
+        )
         return
     path = cfg.free_space_path
     if path is None:

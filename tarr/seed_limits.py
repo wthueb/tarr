@@ -15,10 +15,14 @@ def matched_trackers(config: Config, torrent: Any) -> list[TrackerConfig]:
     try:
         trackers = config.match_trackers(tracker.url for tracker in torrent.trackers)
     except Exception as error:
-        log.warning("unable to resolve torrent trackers; skipping", error_type=type(error).__name__)
+        log.warning(
+            "unable to resolve torrent trackers; skipping",
+            torrent=torrent.hash,
+            error_type=type(error).__name__,
+        )
         return []
     if not trackers:
-        log.debug("torrent has no configured tracker match; skipping")
+        log.debug("torrent has no configured tracker match; skipping", torrent=torrent.hash)
     return trackers
 
 
@@ -64,6 +68,7 @@ def required_limits_met(torrent: Any, trackers: list[TrackerConfig]) -> bool:
         ):
             log.debug(
                 "torrent does not meet required tracker policy",
+                torrent=torrent.hash,
                 tracker=tracker.name,
                 required_seed_time_minutes=tracker.required.seed_time_minutes,
                 required_ratio=tracker.required.ratio,

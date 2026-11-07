@@ -38,7 +38,7 @@ def cleanup_empty_dirs(
 
     mappings = cfg.directory_mappings
     configured_roots = {mapping.local_path.resolve() for mapping in mappings}
-    protected_paths: set[pathlib.Path] = set()
+    protected_paths: dict[pathlib.Path, str] = {}
     for torrent in client.torrents_info():
         save_path = torrent.save_path
         if not save_path:
@@ -51,9 +51,8 @@ def cleanup_empty_dirs(
                 raise ValueError(
                     "torrent paths must be absolute without '..' for directory cleanup"
                 )
-            protected_paths.update(
-                local.resolve() for local in _local_torrent_paths(path, mappings)
-            )
+            for local in _local_torrent_paths(path, mappings):
+                protected_paths[local.resolve()] = torrent.hash
 
     cutoff = time.time() - cfg.min_age_minutes * 60
     for mapping in mappings:
@@ -80,11 +79,20 @@ def cleanup_empty_dirs(
                 path = root / name
                 if any(configured.is_relative_to(path) for configured in configured_roots):
                     continue
-                if any(
-                    protected.is_relative_to(path) or path.is_relative_to(protected)
-                    for protected in protected_paths
-                ):
-                    log.debug("directory is referenced by a torrent; skipping", directory=str(path))
+                torrent_hash = next(
+                    (
+                        torrent_hash
+                        for protected, torrent_hash in protected_paths.items()
+                        if protected.is_relative_to(path) or path.is_relative_to(protected)
+                    ),
+                    None,
+                )
+                if torrent_hash is not None:
+                    log.debug(
+                        "directory is referenced by a torrent; skipping",
+                        directory=str(path),
+                        torrent=torrent_hash,
+                    )
                     continue
                 try:
                     info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)

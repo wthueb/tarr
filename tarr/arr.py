@@ -68,11 +68,16 @@ def removal_allowed(
     for instance in instances:
         try:
             if torrent_in_queue(arrs[instance], torrent_hash):
-                log.info("torrent remains in Arr queue; skipping removal", arr=instance)
+                log.info(
+                    "torrent remains in Arr queue; skipping removal",
+                    torrent=torrent_hash,
+                    arr=instance,
+                )
                 return False
         except Exception as error:
             log.warning(
                 "unable to verify Arr queue; skipping removal",
+                torrent=torrent_hash,
                 arr=instance,
                 error_type=type(error).__name__,
             )

@@ -6,10 +6,12 @@ from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
+from structlog.contextvars import bound_contextvars, get_contextvars, merge_contextvars
+from structlog.testing import capture_logs
 
 from tarr.config import Config, ContentDeletionConfig, MaintainFreeSpaceConfig
 from tarr.deletion import ContentDeletionCoordinator, StorageView
-from tarr.main import run
+from tarr.main import maintain_free_space, run
 from tests.deletion_helpers import (
     Clock,
     FileClient,
@@ -26,6 +28,132 @@ def setup(tmp_path, monkeypatch):
     config = configuration(client)
     coordinator = ContentDeletionCoordinator(client, config.content_deletion)
     return client, config, coordinator, clock
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_events"),
+    [
+        ("confirmed", {"requesting serialized content deletion", "content deletion confirmed"}),
+        ("dry_run", {"would verify content deletion"}),
+        ("ineligible", {"torrent no longer eligible for content deletion"}),
+        ("snapshot_error", {"content deletion could not be verified"}),
+        (
+            "delete_error",
+            {"requesting serialized content deletion", "content deletion could not be verified"},
+        ),
+        (
+            "confirmation_timeout",
+            {
+                "requesting serialized content deletion",
+                "content deletion remains unconfirmed; further content deletion blocked",
+            },
+        ),
+        (
+            "confirmation_error",
+            {
+                "requesting serialized content deletion",
+                "content deletion confirmation failed",
+                "content deletion remains unconfirmed; further content deletion blocked",
+            },
+        ),
+        (
+            "restore_error",
+            {
+                "torrent no longer eligible for content deletion",
+                "unable to restore torrent activity",
+            },
+        ),
+    ],
+)
+def test_deletion_logs_include_info_hash_without_ambient_context(
+    setup, monkeypatch, outcome, expected_events
+):
+    client, _, coordinator, _ = setup
+    torrent = client.add("display-name.mkv", hash="a" * 40)
+    allowed = Mock(return_value=True)
+    if outcome in {"ineligible", "restore_error"}:
+        allowed.side_effect = [True, False]
+    if outcome == "snapshot_error":
+        monkeypatch.setattr(coordinator, "_snapshot", Mock(side_effect=ValueError("unsafe path")))
+    elif outcome == "delete_error":
+        client.on_delete = Mock(side_effect=TimeoutError("response lost"))
+    elif outcome == "confirmation_timeout":
+        client.on_delete = lambda _: None
+    elif outcome == "confirmation_error":
+        monkeypatch.setattr(
+            coordinator.storage, "check_roots", Mock(side_effect=ValueError("storage unavailable"))
+        )
+    elif outcome == "restore_error":
+        torrent.state = "downloading"
+        torrent.progress = 0.5
+        monkeypatch.setattr(
+            client, "torrents_start", Mock(side_effect=RuntimeError("cannot start"))
+        )
+
+    with capture_logs() as logs:
+        coordinator.delete(torrent, allowed, dry_run=outcome == "dry_run")
+
+    assert {event["event"] for event in logs} == expected_events
+    assert all(event["torrent"] == torrent.hash for event in logs)
+    assert get_contextvars() == {}
+
+
+def test_blocked_deletion_log_identifies_attempted_not_pending_torrent(setup):
+    client, _, coordinator, _ = setup
+    pending = client.add("pending.mkv", hash="a" * 40)
+    attempted = client.add("attempted.mkv", hash="b" * 40)
+    client.on_delete = lambda _: None
+    assert not coordinator.delete(pending, lambda _: True)
+
+    with capture_logs() as logs:
+        assert not coordinator.delete(attempted, lambda _: True)
+
+    assert len(logs) == 1
+    assert logs[0]["event"] == "content deletion blocked by unconfirmed operation"
+    assert logs[0]["torrent"] == attempted.hash
+    assert coordinator.pending.torrent_hash == pending.hash
+
+
+@pytest.mark.parametrize("outcome", ["confirmed", "timeout", "storage_error"])
+def test_confirmation_retry_logs_identify_pending_torrent(setup, monkeypatch, outcome):
+    client, _, coordinator, _ = setup
+    torrent = client.add("pending.mkv", hash="a" * 40)
+    client.on_delete = lambda _: None
+    assert not coordinator.delete(torrent, lambda _: True)
+    if outcome == "confirmed":
+        client.finish(torrent.hash)
+    elif outcome == "storage_error":
+        monkeypatch.setattr(
+            coordinator.storage, "check_roots", Mock(side_effect=ValueError("storage unavailable"))
+        )
+
+    with bound_contextvars(torrent="b" * 40), capture_logs(processors=[merge_contextvars]) as logs:
+        coordinator.begin_pass()
+
+    assert logs
+    assert all(event["torrent"] == torrent.hash for event in logs)
+    if outcome == "storage_error":
+        assert any(event["event"] == "content deletion confirmation failed" for event in logs)
+    assert get_contextvars() == {}
+
+
+def test_free_space_blocked_log_identifies_pending_torrent(setup):
+    client, config, coordinator, _ = setup
+    torrent = client.add("pending.mkv", hash="a" * 40)
+    client.on_delete = lambda _: None
+    assert not coordinator.delete(torrent, lambda _: True)
+
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        maintain_free_space(client, config, deletion_coordinator=coordinator)
+
+    blocked = [
+        event
+        for event in logs
+        if event["event"] == "free-space cleanup blocked by unconfirmed content deletion"
+    ]
+    assert len(blocked) == 1
+    assert blocked[0]["torrent"] == torrent.hash
+    assert get_contextvars() == {}
 
 
 def test_requires_both_file_and_torrent_disappearance(setup):

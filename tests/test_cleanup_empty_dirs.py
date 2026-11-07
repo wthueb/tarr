@@ -8,11 +8,18 @@ from unittest.mock import Mock
 import pytest
 import qbittorrentapi
 from pydantic import ValidationError
-from structlog.contextvars import get_contextvars
+from structlog.contextvars import get_contextvars, merge_contextvars
+from structlog.testing import capture_logs
 
 from tarr.cleanup import cleanup_empty_dirs
 from tarr.config import CleanupEmptyDirsConfig, Config
 from tarr.main import run
+
+HASH = "0123456789abcdef0123456789abcdef01234567"
+
+
+def make_torrent(*, torrent_hash=HASH, **kwargs):
+    return SimpleNamespace(hash=torrent_hash, **kwargs)
 
 
 def make_client(torrents=()):
@@ -68,7 +75,7 @@ def test_dry_run_logs_without_removing(tmp_path, monkeypatch):
 @pytest.mark.parametrize("reference", ["save", "content", "parent", "descendant"])
 def test_protects_all_live_torrents_regardless_of_state(tmp_path, state, reference):
     path = make_directory(tmp_path)
-    torrent = SimpleNamespace(save_path=str(tmp_path / "elsewhere"), content_path="", state=state)
+    torrent = make_torrent(save_path=str(tmp_path / "elsewhere"), content_path="", state=state)
     if reference == "save":
         torrent.save_path = str(path)
     elif reference == "content":
@@ -79,10 +86,43 @@ def test_protects_all_live_torrents_regardless_of_state(tmp_path, state, referen
         torrent.save_path = str(path / "nested")
     client = make_client([torrent])
 
-    cleanup_empty_dirs(client, config(tmp_path))
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        cleanup_empty_dirs(client, config(tmp_path))
 
     assert path.is_dir()
     client.torrents_info.assert_called_once_with()
+    skipped = [
+        event
+        for event in logs
+        if event["event"] == "directory is referenced by a torrent; skipping"
+    ]
+    assert len(skipped) == 1
+    assert skipped[0]["torrent"] == torrent.hash
+    assert skipped[0]["directory"] == str(path)
+
+
+def test_cleanup_logs_identify_referencing_torrent_without_leaking_context(tmp_path):
+    candidates = [make_directory(tmp_path, f"Active--{index:08x}") for index in (1, 2)]
+    orphan = make_directory(tmp_path, "Orphan--abcdef12")
+    torrents = [
+        make_torrent(torrent_hash=str(index) * 40, save_path=str(path), content_path="")
+        for index, path in enumerate(candidates, start=1)
+    ]
+
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        cleanup_empty_dirs(make_client(torrents), config(tmp_path))
+
+    skipped = [
+        event
+        for event in logs
+        if event["event"] == "directory is referenced by a torrent; skipping"
+    ]
+    assert {event["directory"]: event["torrent"] for event in skipped} == {
+        str(path): torrent.hash for path, torrent in zip(candidates, torrents, strict=True)
+    }
+    assert all("torrent" not in event for event in logs if event not in skipped)
+    assert not orphan.exists()
+    assert get_contextvars() == {}
 
 
 def test_protects_paths_referenced_through_a_symlink(tmp_path):
@@ -91,7 +131,7 @@ def test_protects_paths_referenced_through_a_symlink(tmp_path):
     alias = tmp_path / "alias"
     alias.symlink_to(root, target_is_directory=True)
     path = make_directory(root)
-    torrent = SimpleNamespace(save_path=str(alias / path.name), content_path="")
+    torrent = make_torrent(save_path=str(alias / path.name), content_path="")
 
     cleanup_empty_dirs(make_client([torrent]), config(root))
 
@@ -155,7 +195,7 @@ def test_api_failure_does_not_remove_any_directories(tmp_path):
 @pytest.mark.parametrize("save_path", ["", "relative/path", "/downloads/../other"])
 def test_missing_or_relative_torrent_path_fails_closed(tmp_path, save_path):
     path = make_directory(tmp_path)
-    torrent = SimpleNamespace(save_path=save_path, content_path="")
+    torrent = make_torrent(save_path=save_path, content_path="")
 
     with pytest.raises(ValueError):
         cleanup_empty_dirs(make_client([torrent]), config(tmp_path))
@@ -351,7 +391,7 @@ def test_mapped_cleanup_scans_local_side_and_protects_torrents(tmp_path, referen
     active = make_directory(local)
     orphan = make_directory(local, "Orphan--abcd1234")
     remote_orphan = make_directory(remote, orphan.name)
-    torrent = SimpleNamespace(save_path=str(tmp_path / "elsewhere"), content_path="")
+    torrent = make_torrent(save_path=str(tmp_path / "elsewhere"), content_path="")
     if reference == "save":
         torrent.save_path = str(remote / active.name)
     elif reference == "content":
@@ -362,8 +402,16 @@ def test_mapped_cleanup_scans_local_side_and_protects_torrents(tmp_path, referen
         torrent.save_path = str(remote / active.name / "nested")
     cfg = CleanupEmptyDirsConfig(directories=[f"{remote}:{local}"])
 
-    cleanup_empty_dirs(make_client([torrent]), cfg, dry_run=dry_run)
+    with capture_logs(processors=[merge_contextvars]) as logs:
+        cleanup_empty_dirs(make_client([torrent]), cfg, dry_run=dry_run)
 
+    skipped = [
+        event
+        for event in logs
+        if event["event"] == "directory is referenced by a torrent; skipping"
+    ]
+    assert skipped
+    assert all(event["torrent"] == torrent.hash for event in skipped)
     assert active.is_dir()
     assert orphan.exists() == (dry_run or reference == "parent")
     assert remote_orphan.is_dir()
@@ -371,7 +419,7 @@ def test_mapped_cleanup_scans_local_side_and_protects_torrents(tmp_path, referen
 
 def test_mapping_matches_components_not_similar_prefixes(tmp_path):
     path = make_directory(tmp_path)
-    torrent = SimpleNamespace(save_path=f"/remote-other/{path.name}", content_path="")
+    torrent = make_torrent(save_path=f"/remote-other/{path.name}", content_path="")
     cfg = CleanupEmptyDirsConfig(directories=[f"/remote:{tmp_path}"])
 
     cleanup_empty_dirs(make_client([torrent]), cfg)
@@ -383,7 +431,7 @@ def test_mapped_source_need_not_exist_locally(tmp_path):
     active = make_directory(tmp_path)
     orphan = make_directory(tmp_path, "Orphan--abcd1234")
     remote = tmp_path / "missing" / "downloads"
-    torrent = SimpleNamespace(save_path=str(remote / active.name), content_path="")
+    torrent = make_torrent(save_path=str(remote / active.name), content_path="")
     cfg = CleanupEmptyDirsConfig(directories=[f"{remote}:{tmp_path}"])
 
     cleanup_empty_dirs(make_client([torrent]), cfg)
@@ -401,7 +449,7 @@ def test_mapped_paths_are_translated_before_resolving_symlinks(tmp_path):
     remote = tmp_path / "remote"
     remote.symlink_to(elsewhere, target_is_directory=True)
     active = make_directory(local)
-    torrent = SimpleNamespace(save_path=str(remote / active.name), content_path="")
+    torrent = make_torrent(save_path=str(remote / active.name), content_path="")
     cfg = CleanupEmptyDirsConfig(directories=[f"{remote}:{local}"])
 
     cleanup_empty_dirs(make_client([torrent]), cfg)
@@ -421,9 +469,7 @@ def test_nested_mapping_uses_longest_source_prefix(tmp_path, reverse):
     specific_candidate = make_directory(specific)
     directories = [f"/remote:{local}", f"/remote/nested:{specific}", str(general)]
     cfg = CleanupEmptyDirsConfig(directories=directories[::-1] if reverse else directories)
-    torrent = SimpleNamespace(
-        save_path=f"/remote/nested/{specific_candidate.name}", content_path=""
-    )
+    torrent = make_torrent(save_path=f"/remote/nested/{specific_candidate.name}", content_path="")
 
     cleanup_empty_dirs(make_client([torrent]), cfg)
 
@@ -438,7 +484,7 @@ def test_parent_torrent_path_protects_nested_mapped_roots(tmp_path):
     specific.mkdir()
     candidate = make_directory(specific)
     cfg = CleanupEmptyDirsConfig(directories=[f"/remote:{general}", f"/remote/nested:{specific}"])
-    torrent = SimpleNamespace(save_path="/remote", content_path="")
+    torrent = make_torrent(save_path="/remote", content_path="")
 
     cleanup_empty_dirs(make_client([torrent]), cfg)
 
@@ -456,8 +502,8 @@ def test_mixed_plain_and_mapped_directories(tmp_path):
     mapped_orphan = make_directory(mapped, "Orphan--abcd1234")
     cfg = CleanupEmptyDirsConfig(directories=[str(plain), f"/remote:{mapped}"])
     torrents = [
-        SimpleNamespace(save_path=str(plain_active), content_path=""),
-        SimpleNamespace(save_path=f"/remote/{mapped_active.name}", content_path=""),
+        make_torrent(save_path=str(plain_active), content_path=""),
+        make_torrent(save_path=f"/remote/{mapped_active.name}", content_path=""),
     ]
 
     cleanup_empty_dirs(make_client(torrents), cfg)

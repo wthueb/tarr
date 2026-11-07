@@ -123,12 +123,28 @@ def test_api_errors_block_removal_without_logging_secrets(monkeypatch, error):
         assert not removal_allowed(HASH, ["movies"], arrs)
 
     assert logs[0]["arr"] == "movies"
+    assert logs[0]["torrent"] == HASH
     assert logs[0]["error_type"] == type(error).__name__
     assert "secret" not in str(logs)
 
 
 def test_missing_instance_fails_closed():
-    assert not removal_allowed(HASH, ["missing"], {})
+    with capture_logs() as logs:
+        assert not removal_allowed(HASH, ["missing"], {})
+
+    assert logs[0]["torrent"] == HASH
+
+
+def test_queued_torrent_log_includes_info_hash_without_ambient_context(monkeypatch):
+    mock_http(monkeypatch, queue_page([{"downloadId": HASH.upper()}]))
+    arrs = {"movies": ArrConfig.model_validate(ARRS["movies"])}
+
+    with capture_logs() as logs:
+        assert not removal_allowed(HASH, ["movies"], arrs)
+
+    assert len(logs) == 1
+    assert logs[0]["event"] == "torrent remains in Arr queue; skipping removal"
+    assert logs[0]["torrent"] == HASH
 
 
 def test_unprotected_category_does_not_query_arr(monkeypatch):
