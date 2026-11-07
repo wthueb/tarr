@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.0.1](https://github.com/wthueb/tarr/compare/v7.0.0...v7.0.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* add "torrent not registered" to unregistered check ([22b25fd](https://github.com/wthueb/tarr/commit/22b25fd2d79fda9e5bc5cf6ec2e3724d09eef1a7))
+* add torrent info hash to all torrent-related logs ([4499c37](https://github.com/wthueb/tarr/commit/4499c377ba650114aa574ba29cc5d1bda53efe82))
+* validate storage reclaimed after torrent deletion ([b61324b](https://github.com/wthueb/tarr/commit/b61324b97f6bf7db3ff07314c9157b22e200f9be))
+
 ## [7.0.0](https://github.com/wthueb/tarr/compare/v6.0.0...v7.0.0) (2026-10-13)
 
 
