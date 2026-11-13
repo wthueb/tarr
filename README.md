@@ -25,9 +25,10 @@ Other capabilities include:
   explicitly opt categories into share-limit management.
 - **Radarr/Sonarr verification:** optionally block removal while a torrent appears
   in any configured instance's queue. Failed checks also block removal.
-- **Verified content deletion:** wait for qBittorrent and locally tracked files to
-  disappear before starting another content deletion; measure actual free space
-  rather than assuming torrent sizes were reclaimed.
+- **Ownership-aware content deletion:** preserve file paths referenced by any other
+  torrent, including unmanaged categories. Delete only uniquely owned files; if
+  none are owned, remove only the torrent. Wait for torrent/file removal before
+  starting another deletion, and measure actual free space rather than crediting sizes.
 - **Dry runs:** preview deletions, directory cleanup, and share-limit changes
   without changing qBittorrent or the filesystem.
 - **Validated YAML configuration:** catch invalid settings at startup, with an
@@ -76,8 +77,18 @@ mounted paths, including when the two processes use different paths.
 ### Before enabling deletion
 
 - Content-deleting jobs require local access to download and staging storage, plus
-  explicit path mappings. Read-only mounts are sufficient; empty-directory cleanup
-  needs writable access to its configured roots.
+  explicit path mappings. Partially shared torrents require writable mounts and
+  permission to unlink their uniquely owned files. Read-only mounts still support
+  wholly owned content deletion through qBittorrent and shared-only metadata removal;
+  partially shared deletions are skipped before removing the torrent if storage is
+  read-only. Empty-directory cleanup also needs writable access.
+- Ownership checks compare mapped file paths, not inode identities: separate
+  hardlinks can be deleted independently. Manifest, download/staging, and `.!qB`
+  paths are considered; failures to determine ownership skip removal. Mixed-content
+  deletions remove torrent metadata first, then unlink only owned files, preserving
+  newly detected references during confirmation. Empty directories are left alone.
+- Ownership checks are refreshed before deletion but are not atomic with external
+  clients adding, moving, or renaming torrents; avoid concurrent storage changes.
 - Required tracker policies guard stopped-torrent and free-space removal.
   Unregistered-torrent removal is a separate policy and can delete incomplete
   downloads.
@@ -102,8 +113,9 @@ Compose builds the local source by default. Remove `build` to use the published
 `ghcr.io/wthueb/tarr:latest` image instead. The image reads `/config/config.yaml`
 and runs as UID/GID 999.
 
-The supplied storage mounts are read-only in `tarr`. For empty-directory cleanup,
-provide a writable mount and a user with permission to remove directories.
+The supplied storage mounts are writable in `tarr` for selective file deletion.
+Ensure its user can traverse storage and unlink files in their parent directories.
+The configuration mount remains read-only.
 
 ## Development
 

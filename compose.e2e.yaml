@@ -42,7 +42,8 @@ services:
       qbittorrent:
         condition: service_healthy
     volumes:
-      - downloads:/downloads:ro
+      - downloads:/downloads
+      - downloads:/readonly:ro
 
 networks:
   default:

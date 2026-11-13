@@ -29,6 +29,7 @@ class FileClient:
         self.torrents = []
         self.files = {}
         self.deleted = []
+        self.delete_requests = []
         self.stopped = []
         self.started = []
         self.forced = []
@@ -87,9 +88,12 @@ class FileClient:
         raise AssertionError("cleanup must not use qBittorrent's cached free-space report")
 
     def torrents_delete(self, torrent_hashes, delete_files):
-        assert delete_files is True
         self.deleted.append(torrent_hashes)
-        self.on_delete(torrent_hashes)
+        self.delete_requests.append((torrent_hashes, delete_files))
+        if delete_files or self.on_delete != self.finish:
+            self.on_delete(torrent_hashes)
+        else:
+            self.torrents = [torrent for torrent in self.torrents if torrent.hash != torrent_hashes]
 
     def finish(self, torrent_hash):
         for file in self.files[torrent_hash]:

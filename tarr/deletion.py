@@ -92,6 +92,42 @@ class StorageView:
         self.inspect(local)
         return usage.f_bavail * usage.f_frsize, info.st_dev
 
+    def require_writable(self, paths: set[pathlib.Path]) -> None:
+        for path in paths:
+            self.inspect(path)
+            if os.statvfs(path.parent).f_flag & os.ST_RDONLY or not os.access(
+                path.parent, os.W_OK | os.X_OK
+            ):
+                raise PermissionError(
+                    f"selective content deletion requires writable storage: {path}"
+                )
+
+    def unlink(self, path: pathlib.Path, identity: tuple[int, int]) -> None:
+        if self.inspect(path) is None:
+            return
+        root = max(
+            (root for root in self.roots if path.is_relative_to(root)),
+            key=lambda root: len(root.parts),
+        )
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        fd = os.open(root, flags)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != self.roots[root]:
+                raise ValueError(f"storage root changed before selective deletion: {root}")
+            for part in path.relative_to(root).parts[:-1]:
+                child = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = child
+            info = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != identity:
+                raise ValueError(f"torrent file changed before selective deletion: {path}")
+            os.unlink(path.name, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        finally:
+            os.close(fd)
+
     def files_under(self, directory: pathlib.Path) -> set[pathlib.Path]:
         info = self.inspect(directory)
         if info is None:
@@ -119,6 +155,7 @@ class PendingDeletion:
     torrent_hash: str
     paths: set[pathlib.Path]
     started_at: float
+    unlink_paths: dict[pathlib.Path, tuple[int, int]] | None = None
 
 
 class ContentDeletionCoordinator:
@@ -128,6 +165,7 @@ class ContentDeletionCoordinator:
         self.storage = StorageView(config.directory_mappings)
         self.pending: PendingDeletion | None = None
         self.blocked = False
+        self.estimated_reclaimed_bytes = 0
 
     @property
     def unresolved(self) -> bool:
@@ -161,9 +199,7 @@ class ContentDeletionCoordinator:
                 return False
             time.sleep(min(self.config.poll_interval_seconds, remaining))
 
-    def _snapshot(self, torrent: Any, target_device: int | None) -> set[pathlib.Path]:
-        if torrent.state in UNSTABLE_STATES:
-            raise ValueError("torrent storage is moving or being checked")
+    def _storage_bases(self, torrent: Any) -> set[pathlib.Path]:
         progress = torrent.progress
         if (
             isinstance(progress, bool)
@@ -180,6 +216,52 @@ class ContentDeletionCoordinator:
                 bases.add(absolute_path(download_path))
             if preferences.get("temp_path_enabled"):
                 bases.add(absolute_path(preferences.get("temp_path")))
+        return bases
+
+    def _manifest_paths(self, torrent: Any, bases: set[pathlib.Path]) -> set[pathlib.Path]:
+        paths: set[pathlib.Path] = set()
+        for file in self.client.torrents_files(torrent_hash=torrent.hash):
+            name = pathlib.Path(file.name)
+            if not file.name or name.is_absolute() or ".." in name.parts or not name.parts:
+                raise ValueError("invalid torrent file name")
+            for base in bases:
+                paths.add(base / name)
+                paths.add(base / (str(name) + ".!qB"))
+        return paths
+
+    def _owned_paths(self, torrent_hash: str, paths: set[pathlib.Path]) -> set[pathlib.Path]:
+        owned = paths.copy()
+        if not paths:
+            return owned
+        for peer in self.client.torrents_info():
+            if peer.hash == torrent_hash:
+                continue
+            bases = self._storage_bases(peer)
+            references = self._manifest_paths(peer, bases)
+            has_manifest = bool(references)
+            content_path = getattr(peer, "content_path", "")
+            if content_path:
+                content = absolute_path(content_path)
+                if not any(base.is_relative_to(content) for base in bases):
+                    references.update((content, pathlib.Path(str(content) + ".!qB")))
+            for reference in references:
+                if not any(
+                    reference.is_relative_to(mapping.qbittorrent_path)
+                    for mapping in self.storage.mappings
+                ):
+                    continue
+                local = self.storage.local_path(reference)
+                if peer.state in UNSTABLE_STATES:
+                    raise ValueError("another torrent's storage is moving or being checked")
+                owned.discard(local)
+                if not has_manifest and self.storage.inspect(local) is not None:
+                    owned.difference_update(path for path in paths if path.is_relative_to(local))
+        return owned
+
+    def _snapshot(self, torrent: Any, target_device: int | None) -> set[pathlib.Path]:
+        if torrent.state in UNSTABLE_STATES:
+            raise ValueError("torrent storage is moving or being checked")
+        bases = self._storage_bases(torrent)
         for base in bases:
             local = self.storage.local_path(base)
             info = self.storage.inspect(local)
@@ -188,14 +270,9 @@ class ContentDeletionCoordinator:
                     raise ValueError(f"torrent storage path is not a directory: {base}")
                 with os.scandir(local):
                     pass
-        candidates: set[pathlib.Path] = set()
-        for file in self.client.torrents_files(torrent_hash=torrent.hash):
-            name = pathlib.Path(file.name)
-            if not file.name or name.is_absolute() or ".." in name.parts or not name.parts:
-                raise ValueError("invalid torrent file name")
-            for base in bases:
-                for relative in (name, pathlib.Path(str(name) + ".!qB")):
-                    candidates.add(self.storage.local_path(base / relative))
+        candidates = {
+            self.storage.local_path(path) for path in self._manifest_paths(torrent, bases)
+        }
         content_path = getattr(torrent, "content_path", "")
         if content_path:
             content = absolute_path(content_path)
@@ -243,6 +320,7 @@ class ContentDeletionCoordinator:
         allowed_after_stop replaces only the final policy check when this operation
         stopped the torrent. The initial allowed check always runs before stopping.
         """
+        self.estimated_reclaimed_bytes = 0
         if self.unresolved:
             log.warning("content deletion blocked by unconfirmed operation", torrent=torrent.hash)
             return False
@@ -263,7 +341,23 @@ class ContentDeletionCoordinator:
                     return False
             paths = self._snapshot(torrent, target_device)
             if dry_run:
-                log.info("would verify content deletion", torrent=torrent_hash, estimated=True)
+                owned = self._owned_paths(torrent_hash, paths)
+                if paths and owned == paths:
+                    self.estimated_reclaimed_bytes = torrent.size
+                else:
+                    self.estimated_reclaimed_bytes = sum(
+                        info.st_size
+                        for path in owned
+                        if (info := self.storage.inspect(path)) is not None
+                    )
+                log.info(
+                    "would verify content deletion",
+                    torrent=torrent_hash,
+                    estimated=True,
+                    owned_file_count=len(owned),
+                    shared_file_count=len(paths - owned),
+                    estimated_reclaimed_bytes=self.estimated_reclaimed_bytes,
+                )
                 return True
             if torrent.progress < 1 and torrent.state not in STOPPED_STATES:
                 forced = bool(getattr(torrent, "force_start", False))
@@ -303,14 +397,28 @@ class ContentDeletionCoordinator:
             if free_space_path is not None and threshold is not None:
                 if self.free_space(free_space_path) >= threshold:
                     return False
+            owned = self._owned_paths(torrent_hash, paths)
+            delete_files = bool(paths) and owned == paths
+            unlink_paths = None
+            if not delete_files:
+                self.storage.require_writable(owned)
+                unlink_paths = {}
+                for path in owned:
+                    info = self.storage.inspect(path)
+                    if info is None:
+                        raise ValueError("torrent files changed before selective deletion")
+                    unlink_paths[path] = (info.st_dev, info.st_ino)
             requested = True
-            self.pending = PendingDeletion(torrent_hash, paths, time.monotonic())
+            self.pending = PendingDeletion(torrent_hash, owned, time.monotonic(), unlink_paths)
             log.info(
                 "requesting serialized content deletion",
                 torrent=torrent_hash,
-                tracked_file_count=len(paths),
+                tracked_file_count=len(owned),
+                owned_file_count=len(owned),
+                shared_file_count=len(paths - owned),
+                delete_files=delete_files,
             )
-            self.client.torrents_delete(torrent_hashes=torrent_hash, delete_files=True)
+            self.client.torrents_delete(torrent_hashes=torrent_hash, delete_files=delete_files)
             return self._confirm()
         except Exception as error:
             if self.pending is not None:
@@ -333,6 +441,20 @@ class ContentDeletionCoordinator:
 
         def complete() -> bool:
             self.storage.check_roots()
+            if pending.unlink_paths is not None:
+                if self._torrent(pending.torrent_hash) is not None:
+                    return False
+                owned = self._owned_paths(pending.torrent_hash, pending.paths)
+                for path in pending.paths - owned:
+                    log.info(
+                        "preserving newly shared torrent file",
+                        torrent=pending.torrent_hash,
+                        shared_path=str(path),
+                    )
+                    pending.unlink_paths.pop(path, None)
+                pending.paths = owned
+                for path, identity in pending.unlink_paths.items():
+                    self.storage.unlink(path, identity)
             files_gone = all(self.storage.inspect(path) is None for path in pending.paths)
             return files_gone and self._torrent(pending.torrent_hash) is None
 

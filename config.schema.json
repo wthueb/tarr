@@ -112,10 +112,10 @@
     },
     "ContentDeletionConfig": {
       "additionalProperties": false,
-      "description": "Verify one outstanding content deletion across all removal jobs, in memory only.\n\nMount download/staging storage read-only. Timeout retains the pending guard across\ndaemon passes, but restarting tarr loses it. Unlink completion is trusted without\nrequiring an expected byte increase; open handles can delay actual space recovery.\nqBittorrent's autonomous actions and other processes are outside this guard.",
+      "description": "Verify one outstanding content deletion across all removal jobs, in memory only.\n\nMount download/staging storage writable for selective deletion of uniquely owned\npaths in partially shared torrents. Shared-only torrents lose only metadata;\nwholly owned content can still be deleted through qBittorrent on read-only mounts.\nTimeout retains the pending guard across daemon passes, but restarting tarr loses it.\nUnlink completion is trusted without requiring an expected byte increase;\nopen handles can delay actual space recovery.\nqBittorrent's autonomous actions and other processes are outside this guard.",
       "properties": {
         "path_mappings": {
-          "description": "Download and staging roots visible to tarr. Use absolute non-root paths or 'qBittorrent-path:tarr-path'; the most-specific source wins. Conflicting sources and '..' are forbidden. Required when any enabled job deletes content. Symlink paths and inaccessible mounts are skipped. Confirmation tracks files that exist before deletion without requiring a particular content layout.",
+          "description": "Download and staging roots visible to tarr. Use absolute non-root paths or 'qBittorrent-path:tarr-path'; the most-specific source wins. Conflicting sources and '..' are forbidden. Required when any enabled job deletes content. Symlink paths and inaccessible mounts are skipped. Confirmation tracks files that exist before deletion without requiring a particular content layout. Paths referenced by other torrents are preserved. Partially shared content requires writable mounts so tarr can unlink only uniquely owned files.",
           "examples": [
             [
               "/downloads",
@@ -247,7 +247,7 @@
           }
         }
       ],
-      "description": "Delete eligible torrents with content until the target filesystem has enough free space.\n\nEvery matched tracker must pass its required seed-time OR ratio policy; no match\nmeans no removal. Highest effective delete_priority goes first (the minimum\nacross matched trackers), then most swarm seeders. Desired limits and category\noverrides do not govern eligibility. Content deletion is serialized and verified\non read-only local mounts. Free space is measured directly on the target filesystem;\nhard links are not assumed to reclaim space. Dry runs estimate from sizes.\nArr verification failures skip a candidate and continue to other torrents.",
+      "description": "Delete eligible torrents with content until the target filesystem has enough free space.\n\nEvery matched tracker must pass its required seed-time OR ratio policy; no match\nmeans no removal. Highest effective delete_priority goes first (the minimum\nacross matched trackers), then most swarm seeders. Desired limits and category\noverrides do not govern eligibility. Only uniquely owned file paths are deleted;\nshared-only torrents are removed without content. Partially shared deletions need\nwritable local mounts. Free space is measured directly on the target filesystem;\nhard links are not assumed to reclaim space. Dry runs estimate owned content.\nArr verification failures skip a candidate and continue to other torrents.",
       "properties": {
         "enabled": {
           "default": false,
@@ -963,7 +963,7 @@
     },
     "content_deletion": {
       "$ref": "#/$defs/ContentDeletionConfig",
-      "description": "Shared read-only filesystem verification and serialized content deletion. Configure mappings before enabling a job that deletes files. Pending state is memory-only and is lost on restart.",
+      "description": "Ownership-aware filesystem verification and serialized content deletion. Configure mappings before enabling a job that deletes files. Pending state is memory-only and is lost on restart.",
       "examples": [
         {
           "path_mappings": [

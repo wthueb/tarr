@@ -12,6 +12,7 @@ def policy_deletion(monkeypatch):
             self.client = client
             self.pending = None
             self.blocked = False
+            self.estimated_reclaimed_bytes = 0
 
         @property
         def unresolved(self):
@@ -26,6 +27,7 @@ def policy_deletion(monkeypatch):
         def delete(self, torrent, allowed, *, dry_run=False, **kwargs):
             if not allowed(torrent):
                 return False
+            self.estimated_reclaimed_bytes = torrent.size
             if not dry_run:
                 torrent.delete(delete_files=True)
             return True

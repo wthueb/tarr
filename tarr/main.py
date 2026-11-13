@@ -475,7 +475,7 @@ def maintain_free_space(
             break
         if dry_run:
             if removed:
-                free_space += torrent.size
+                free_space += coordinator.estimated_reclaimed_bytes
         else:
             free_space = coordinator.free_space(path)
     log.info(

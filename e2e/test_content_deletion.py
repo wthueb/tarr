@@ -1,10 +1,12 @@
 import errno
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from e2e.support import recheck_complete_torrents, wait_for_torrents
-from tarr.config import RemoveUnregisteredConfig
+from tarr.config import ContentDeletionConfig, RemoveUnregisteredConfig
+from tarr.deletion import ContentDeletionCoordinator
 from tarr.main import remove_unregistered
 
 
@@ -14,9 +16,9 @@ def test_cli():
     assert "usage: tarr" in result.stdout
 
 
-def test_downloads_are_read_only(storage):
+def test_read_only_storage_mount():
     with pytest.raises(OSError) as error:
-        (storage / "must-not-write").write_bytes(b"no")
+        Path("/readonly/must-not-write").write_bytes(b"no")
     assert error.value.errno == errno.EROFS
 
 
@@ -34,6 +36,66 @@ def test_hard_links(client, coordinator, storage, add_torrent):
             assert (storage / "two.bin").exists()
         assert coordinator.free_space(storage) > 0
     assert not client.torrents_info()
+
+
+def readonly_coordinator(client):
+    return ContentDeletionCoordinator(
+        client,
+        ContentDeletionConfig(
+            path_mappings=["/downloads:/readonly"],
+            poll_interval_seconds=1,
+            timeout_seconds=15,
+        ),
+    )
+
+
+@pytest.mark.parametrize("readonly", [False, True])
+def test_same_file_different_torrents(client, coordinator, storage, add_torrent, readonly):
+    name = "readonly-shared.bin" if readonly else "shared-only.bin"
+    for source in ("one", "two"):
+        add_torrent(f"{name}.{source}.torrent")
+    torrents = recheck_complete_torrents(client, 2)
+    assert torrents[0].hash != torrents[1].hash
+    assert torrents[0].content_path == torrents[1].content_path
+    if readonly:
+        coordinator = readonly_coordinator(client)
+
+    assert coordinator.delete(torrents[0], lambda _: True)
+    assert (storage / name).exists()
+    remaining = recheck_complete_torrents(client, 1)[0]
+    assert remaining.hash == torrents[1].hash
+    assert coordinator.pending is None
+
+    assert coordinator.delete(remaining, lambda _: True)
+    assert not (storage / name).exists()
+    assert not client.torrents_info()
+
+
+def test_partially_shared_multifile_torrents(client, coordinator, storage, add_torrent):
+    for name in ("selected", "retained"):
+        add_torrent(name + ".torrent", content_layout="NoSubfolder")
+    torrents = recheck_complete_torrents(client, 2)
+    selected = next(t for t in torrents if t.name == "selected")
+    retained = next(t for t in torrents if t.name == "retained")
+
+    readonly = readonly_coordinator(client)
+    assert not readonly.delete(selected, lambda _: True)
+    assert readonly.pending is None
+    assert len(client.torrents_info()) == 2
+    assert (storage / "selected-part").exists()
+
+    assert coordinator.delete(selected, lambda _: True)
+    assert coordinator.pending is None
+    assert not (storage / "selected-part").exists()
+    assert (storage / "shared-part").exists()
+    assert (storage / "retained-part").exists()
+    remaining = recheck_complete_torrents(client, 1)[0]
+    assert remaining.hash == retained.hash
+
+    assert coordinator.delete(remaining, lambda _: True)
+    assert not (storage / "shared-part").exists()
+    assert not (storage / "retained-part").exists()
+    assert (storage / "unrelated").exists()
 
 
 def test_multi_file_release(client, coordinator, storage, add_torrent):

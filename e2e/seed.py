@@ -57,6 +57,28 @@ def seed():
         },
     )
 
+    for name in ("shared-only.bin", "readonly-shared.bin"):
+        write(root / name, payload)
+        for source in (b"one", b"two"):
+            torrent(
+                name + "." + source.decode() + ".torrent",
+                {b"name": name.encode(), b"length": len(payload), b"source": source},
+            )
+
+    for name in ("shared-part", "selected-part", "retained-part"):
+        write(root / name, payload[: len(payload) // 2])
+    for name, unique in (("selected", b"selected-part"), ("retained", b"retained-part")):
+        torrent(
+            name + ".torrent",
+            {
+                b"name": name.encode(),
+                b"files": [
+                    {b"length": len(payload) // 2, b"path": [part]}
+                    for part in (b"shared-part", unique)
+                ],
+            },
+        )
+
     nested = directory("nested")
     os.link(root / "one.bin", nested / "movie.bin")
     torrent(

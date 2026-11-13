@@ -383,9 +383,10 @@ class MaintainFreeSpaceConfig(CategoryFilterConfig):
     Every matched tracker must pass its required seed-time OR ratio policy; no match
     means no removal. Highest effective delete_priority goes first (the minimum
     across matched trackers), then most swarm seeders. Desired limits and category
-    overrides do not govern eligibility. Content deletion is serialized and verified
-    on read-only local mounts. Free space is measured directly on the target filesystem;
-    hard links are not assumed to reclaim space. Dry runs estimate from sizes.
+    overrides do not govern eligibility. Only uniquely owned file paths are deleted;
+    shared-only torrents are removed without content. Partially shared deletions need
+    writable local mounts. Free space is measured directly on the target filesystem;
+    hard links are not assumed to reclaim space. Dry runs estimate owned content.
     Arr verification failures skip a candidate and continue to other torrents.
     """
 
@@ -545,9 +546,12 @@ CleanupDirectoryMapping = DirectoryMapping
 class ContentDeletionConfig(BaseModel):
     """Verify one outstanding content deletion across all removal jobs, in memory only.
 
-    Mount download/staging storage read-only. Timeout retains the pending guard across
-    daemon passes, but restarting tarr loses it. Unlink completion is trusted without
-    requiring an expected byte increase; open handles can delay actual space recovery.
+    Mount download/staging storage writable for selective deletion of uniquely owned
+    paths in partially shared torrents. Shared-only torrents lose only metadata;
+    wholly owned content can still be deleted through qBittorrent on read-only mounts.
+    Timeout retains the pending guard across daemon passes, but restarting tarr loses it.
+    Unlink completion is trusted without requiring an expected byte increase;
+    open handles can delay actual space recovery.
     qBittorrent's autonomous actions and other processes are outside this guard.
     """
 
@@ -560,7 +564,9 @@ class ContentDeletionConfig(BaseModel):
             "'qBittorrent-path:tarr-path'; the most-specific source wins. Conflicting sources "
             "and '..' are forbidden. Required when any enabled job deletes content. "
             "Symlink paths and inaccessible mounts are skipped. Confirmation tracks files "
-            "that exist before deletion without requiring a particular content layout."
+            "that exist before deletion without requiring a particular content layout. "
+            "Paths referenced by other torrents are preserved. Partially shared content "
+            "requires writable mounts so tarr can unlink only uniquely owned files."
         ),
         examples=[["/downloads", "/incomplete"], ["/downloads:/data/downloads"]],
     )
@@ -770,7 +776,7 @@ class Config(BaseModel):
     content_deletion: ContentDeletionConfig = Field(
         default_factory=ContentDeletionConfig,
         description=(
-            "Shared read-only filesystem verification and serialized content deletion. "
+            "Ownership-aware filesystem verification and serialized content deletion. "
             "Configure mappings before enabling a job that deletes files. Pending state "
             "is memory-only and is lost on restart."
         ),
@@ -910,7 +916,7 @@ class Config(BaseModel):
         )
         if deletes_content and not self.content_deletion.path_mappings:
             raise ValueError(
-                "configure content_deletion.path_mappings and mount storage read-only "
+                "configure content_deletion.path_mappings and mount download/staging storage "
                 "before enabling content deletion"
             )
         if self.maintain_free_space.enabled:

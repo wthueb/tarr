@@ -25,8 +25,8 @@ services:
       - TZ=America/New_York
     volumes:
       - ./config.yaml:/config/config.yaml:ro
-      - downloads:/downloads:ro
-      - incomplete:/incomplete:ro
+      - downloads:/downloads
+      - incomplete:/incomplete
 
 volumes:
   qbittorrent-config:
