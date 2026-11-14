@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.0.2](https://github.com/wthueb/tarr/compare/v7.0.1...v7.0.2) (2026-11-13)
+
+
+### Bug Fixes
+
+* safe deletion of torrents with shared content files ([55ef649](https://github.com/wthueb/tarr/commit/55ef649cb95abe0a00c6676eb357ea43c9b05046))
+
 ## [7.0.1](https://github.com/wthueb/tarr/compare/v7.0.0...v7.0.1) (2026-11-07)
 
 
